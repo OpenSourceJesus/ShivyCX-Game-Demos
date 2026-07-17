@@ -51,10 +51,10 @@ toggle the grid overlay, **Esc** menu.
 | layer | files | origin |
 |---|---|---|
 | boot: Multiboot1 AOUT kludge -> long mode, 4 GiB identity map, SSE | `boot64.S`, `linker64.ld` | mbos, unchanged |
-| graphics: Bochs-VBE (DISPI 0x1CE/0x1CF) 32-bpp linear framebuffer | `vbe.c` | mbos, unchanged |
+| graphics: Bochs-VBE (DISPI 0x1CE/0x1CF) 32-bpp linear framebuffer | `vbe.c` | mbos, + `gfx_present()` bulk blit |
 | freestanding libc for the generated runtime | `rpy/rt_freestanding.c`, `rpy/freestanding_inc/` | mbos, unchanged |
 | kernel: serial, polled PS/2 keyboard, PIT ms clock, PC speaker | `kernel.c`, `kernel.h` | new |
-| FFI shim: back buffer, rects/circles/round-rects, sprite blitter (scale + tint + alpha + quarter rotation), 8x16 text, present, input, time | `glue.c` (+ `sprites.c`, generated) | new |
+| FFI shim: back buffer + baked-scene cache, rects/circles/round-rects, sprite blitter (scale + tint + alpha + quarter rotation), 8x16 text, present, input, time | `glue.c` (+ `sprites.c`, generated) | new |
 | the game: turn pipeline, undo/redo, menus, rendering | `rpy/game.py` -> `gen/game.c` | new (rpython) |
 | FFI bindings + key decoding | `rpy/engine.py` | new (rpython) |
 | level data | `rpy/levels.py` | generated |

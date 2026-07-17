@@ -214,6 +214,12 @@ class Game:
         self.confy: "list[int]" = []
         self.confc: "list[int]" = []
         self.lastms = 0
+        self.fpsframes = 0
+        self.fpsms = 0
+        # scene-cache dirty flag: when 1, the static board layer is redrawn
+        # and baked (engine.bake); frames in between just restore the bake
+        # and draw the animated entities on top.
+        self.dirty = 1
 
     # ------------------------------------------------------------- helpers
 
@@ -343,6 +349,7 @@ class Game:
 
     def load_level(self, idx: int) -> None:
         self.levelidx = idx
+        self.dirty = 1
         d = levels.level_data(idx)
         lines = d.split("\n")
         nlines = len(lines)
@@ -1700,6 +1707,16 @@ class Game:
         return self.oy - cy * self.cell
 
     def draw_board(self, tms: int) -> None:
+        # static layer from the scene cache, animated entities on top
+        if self.dirty == 1:
+            self.draw_board_static()
+            engine.bake()
+            self.dirty = 0
+        else:
+            engine.restore()
+        self.draw_board_dynamic(tms)
+
+    def draw_board_static(self) -> None:
         cell = self.cell
         sw = engine.width()
         sh = engine.height()
@@ -1785,7 +1802,7 @@ class Game:
             engine.rect_a(px + cell // 3, py + cell // 3, cell // 3,
                           cell // 3, self.padcol[i], 130)
             i = i + 1
-        # portals + pair links
+        # portal pair links (the rotating portal sprites are dynamic)
         i = 0
         while i < len(self.porx):
             oi = self.portal_other(i)
@@ -1800,10 +1817,6 @@ class Game:
                     ly = y0 + (y1 - y0) * seg // 24
                     engine.rect_a(lx - 1, ly - 1, 3, 3, self.porcol[i], 64)
                     seg = seg + 1
-            px = self.cell_px(self.porx[i])
-            py = self.cell_py(self.pory[i])
-            engine.sprite_ex(engine.SPR_PORTAL, px, py, cell, cell,
-                             self.porcol[i], 256, (tms // 300) & 3)
             i = i + 1
         # stars, apple
         i = 0
@@ -1832,6 +1845,16 @@ class Game:
             if self.bomblive[i] == 1:
                 engine.sprite(engine.SPR_BOMB, self.cell_px(self.bombx[i]),
                               self.cell_py(self.bomby[i]), cell, cell)
+            i = i + 1
+
+    def draw_board_dynamic(self, tms: int) -> None:
+        cell = self.cell
+        # rotating portal sprites
+        i = 0
+        while i < len(self.porx):
+            engine.sprite_ex(engine.SPR_PORTAL, self.cell_px(self.porx[i]),
+                             self.cell_py(self.pory[i]), cell, cell,
+                             self.porcol[i], 256, (tms // 300) & 3)
             i = i + 1
         # bug swarms: three bugs wandering their cell
         i = 0
@@ -1865,6 +1888,7 @@ class Game:
                                  self.cell_py(self.blocky[i]), cell, cell,
                                  16777215, 256 - age * 256 // 1000, 0)
             i = i + 1
+        self.draw_hud()
 
     def draw_snake(self, si: int, tms: int) -> None:
         s = self.snake(si)
@@ -2119,6 +2143,8 @@ class Game:
     # --------------------------------------------------------------- loop
 
     def handle_key_game(self, k: int) -> None:
+        # any action can change the board; rebake the static layer
+        self.dirty = 1
         if k == engine.K_ESC:
             self.screen = SCR_SELECT
             _log("[game] back to menu")
@@ -2156,6 +2182,13 @@ class Game:
                 dt = 0
             if dt > 100:
                 dt = 100
+            self.fpsframes = self.fpsframes + 1
+            if tms - self.fpsms >= 2000:
+                if self.fpsms > 0:
+                    _log("[game] fps " +
+                         str(self.fpsframes * 1000 // (tms - self.fpsms)))
+                self.fpsms = tms
+                self.fpsframes = 0
             k = engine.poll_key()
             if self.screen == SCR_TITLE:
                 if k == engine.K_ENTER:
@@ -2188,7 +2221,6 @@ class Game:
                     self.handle_key_game(k)
                 self.animate(dt)
                 self.draw_board(tms)
-                self.draw_hud()
                 if self.winning == 1:
                     age = tms - self.winms
                     if age > 600:

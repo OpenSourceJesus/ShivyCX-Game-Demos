@@ -9,9 +9,9 @@
 #   make clean
 #
 # The platform pieces (boot64.S, linker64.ld, vbe.c, libmini.c, font8x16.h,
-# rpy/rt_freestanding.c, rpy/freestanding_inc/) are lifted unchanged from
-# ShivyC's examples/rpython2c/mbos demo; kernel.c/glue.c and the rpy game
-# modules are this demo's own.
+# rpy/rt_freestanding.c, rpy/freestanding_inc/) are lifted from ShivyC's
+# examples/rpython2c/mbos demo (vbe.c gains a bulk gfx_present blit);
+# kernel.c/glue.c and the rpy game modules are this demo's own.
 
 SHIVYC ?= ../../ShivyC
 PY2C   := $(SHIVYC)/tools/py2c.py

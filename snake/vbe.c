@@ -102,6 +102,18 @@ void gfx_glyph(const u8 *rows, u32 px, u32 py, u32 fg, u32 bg) {
     }
 }
 
+/* Bulk-copy one full frame into the LFB in 64-bit stores -- the back-buffer
+ * present for the game (added over mbos: per-pixel gfx_pixel presents were
+ * the frame-rate bottleneck). */
+void gfx_present(const u32 *src) {
+    if (!g_up) return;
+    volatile u64 *d = (volatile u64 *)g_fb;
+    const u64 *s = (const u64 *)src;
+    u32 n = (g_w * g_h) >> 1, i;
+    for (i = 0; i < n; i++) d[i] = s[i];
+    if ((g_w * g_h) & 1) g_fb[g_w * g_h - 1] = src[g_w * g_h - 1];
+}
+
 /* Scroll the whole framebuffer up by `dy` pixels, clearing the new bottom. */
 void gfx_scroll(u32 dy, u32 bg) {
     if (!g_up || dy == 0 || dy >= g_h) return;

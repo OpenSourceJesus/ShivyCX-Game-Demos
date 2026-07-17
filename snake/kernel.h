@@ -65,6 +65,7 @@ void gfx_pixel(u32 x, u32 y, u32 rgb);
 void gfx_fill(u32 rgb);
 void gfx_glyph(const u8 *rows, u32 px, u32 py, u32 fg, u32 bg);
 void gfx_scroll(u32 dy, u32 bg);
+void gfx_present(const u32 *src); /* bulk full-frame copy into the LFB      */
 
 /* Default graphics geometry: the mbos hi-res mode (1920x1080 needs
  * `-vga none -device VGA,vgamem_mb=64`; see Makefile). vbe.c reads these

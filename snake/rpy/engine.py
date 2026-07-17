@@ -45,6 +45,10 @@ _g.sg_sprite_h.restype = ctypes.c_int
 _g.sg_sprite_h.argtypes = [ctypes.c_int]
 _g.sg_present.restype = None
 _g.sg_present.argtypes = []
+_g.sg_bake.restype = None
+_g.sg_bake.argtypes = []
+_g.sg_restore.restype = None
+_g.sg_restore.argtypes = []
 _g.sg_key_event.restype = ctypes.c_int
 _g.sg_key_event.argtypes = []
 _g.sg_ms.restype = ctypes.c_int
@@ -151,6 +155,16 @@ def sprite_h(sid: int) -> int:
 
 def present() -> None:
     _g.sg_present()
+
+
+def bake() -> None:
+    """Snapshot the back buffer into the scene cache."""
+    _g.sg_bake()
+
+
+def restore() -> None:
+    """Reset the back buffer from the scene cache."""
+    _g.sg_restore()
 
 
 def ms() -> int:

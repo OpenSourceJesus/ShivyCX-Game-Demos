@@ -14,16 +14,36 @@
 #include "kernel.h"
 #include "font8x16.h"
 
-static u32 g_back[MBOS_GFX_W * (u32)MBOS_GFX_H];
+static u32 g_back[MBOS_GFX_W * (u32)MBOS_GFX_H] __attribute__((aligned(16)));
+
+/* A second full frame: the "baked scene". The game renders everything that
+ * only changes on a turn (background, grid, cells, crates, ...) once, bakes
+ * it here, and per frame just restores it and draws the animated entities on
+ * top. Rebaking happens on state changes only, so the per-frame cost drops
+ * from ~4M blended pixels to two bulk copies plus a few sprites. */
+static u32 g_scene[MBOS_GFX_W * (u32)MBOS_GFX_H] __attribute__((aligned(16)));
+
+static void copy_frame(u32 *dst, const u32 *src) {
+    u64 *d = (u64 *)dst;
+    const u64 *s = (const u64 *)src;
+    u32 n = (gfx_width() * gfx_height()) >> 1, i;
+    for (i = 0; i < n; i++) d[i] = s[i];
+}
 
 /* ---- geometry ----------------------------------------------------------- */
 int sg_width(void)  { return (int)gfx_width(); }
 int sg_height(void) { return (int)gfx_height(); }
 
+/* ---- scene cache --------------------------------------------------------- */
+void sg_bake(void)    { copy_frame(g_scene, g_back); }
+void sg_restore(void) { copy_frame(g_back, g_scene); }
+
 /* ---- painting into the back buffer -------------------------------------- */
 void sg_clear(int rgb) {
-    u32 n = gfx_width() * gfx_height(), i;
-    for (i = 0; i < n; i++) g_back[i] = (u32)rgb;
+    u64 *d = (u64 *)g_back;
+    u64 v = (u32)rgb | ((u64)(u32)rgb << 32);
+    u32 n = (gfx_width() * gfx_height()) >> 1, i;
+    for (i = 0; i < n; i++) d[i] = v;
 }
 
 void sg_rect(int x, int y, int w, int h, int rgb) {
@@ -137,24 +157,68 @@ typedef struct { int w, h; const unsigned int *px; } Sprite;
 extern const Sprite SPRITES[];
 extern const int SPRITE_COUNT;
 
+/* (x * a) / 255 without a divide, exact for 8-bit operands. */
+static inline u32 mul255(u32 x, u32 a) {
+    u32 t = x * a + 128;
+    return (t + (t >> 8)) >> 8;
+}
+
 /* Scaled, alpha-blended, optionally tinted + quarter-rotated sprite blit.
  * tint is 0xRRGGBB multiplied into the texel (0xFFFFFF = untinted); alpha
- * 0..256 scales the texel's own alpha; rot counts 90-degree CCW turns. */
+ * 0..256 scales the texel's own alpha; rot counts 90-degree CCW turns.
+ *
+ * The rot==0 case (everything except portals/eyes) walks the sprite with
+ * fixed-point row/column stepping instead of two divides per pixel, and
+ * stores opaque texels directly -- that makes the full-screen background
+ * blit a plain scaled copy. */
 void sg_sprite(int id, int x, int y, int w, int h, int tint, int alpha,
                int rot) {
     int W = (int)gfx_width(), H = (int)gfx_height();
     const Sprite *sp;
     int i, j;
     u32 tr, tg, tb;
+    int tinted;
     if (id < 0 || id >= SPRITE_COUNT || w <= 0 || h <= 0) return;
     sp = &SPRITES[id];
     tr = ((u32)tint >> 16) & 0xFF; tg = ((u32)tint >> 8) & 0xFF; tb = (u32)tint & 0xFF;
+    tinted = (u32)tint != 0xFFFFFFu;
+
+    if ((rot & 3) == 0) {
+        int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
+        int x1 = x + w > W ? W : x + w, y1 = y + h > H ? H : y + h;
+        u32 sxstep = ((u32)sp->w << 16) / (u32)w;
+        u32 systep = ((u32)sp->h << 16) / (u32)h;
+        u32 syf = (u32)(y0 - y) * systep;
+        u32 sx0 = (u32)(x0 - x) * sxstep;
+        for (j = y0; j < y1; j++, syf += systep) {
+            const u32 *srow = sp->px + (syf >> 16) * (u32)sp->w;
+            u32 *drow = g_back + j * W;
+            u32 sxf = sx0;
+            for (i = x0; i < x1; i++, sxf += sxstep) {
+                u32 texel = srow[sxf >> 16];
+                u32 a = texel >> 24;
+                u32 r, g, b, dst;
+                if (alpha != 256) a = (a * (u32)alpha) >> 8;
+                if (a == 0) continue;
+                r = (texel >> 16) & 0xFF; g = (texel >> 8) & 0xFF; b = texel & 0xFF;
+                if (tinted) { r = mul255(r, tr); g = mul255(g, tg); b = mul255(b, tb); }
+                if (a == 255) { drow[i] = (r << 16) | (g << 8) | b; continue; }
+                dst = drow[i];
+                r = mul255(r, a) + mul255((dst >> 16) & 0xFF, 255 - a);
+                g = mul255(g, a) + mul255((dst >> 8) & 0xFF, 255 - a);
+                b = mul255(b, a) + mul255(dst & 0xFF, 255 - a);
+                drow[i] = (r << 16) | (g << 8) | b;
+            }
+        }
+        return;
+    }
+
     for (j = 0; j < h; j++) {
         int py = y + j;
         if (py < 0 || py >= H) continue;
         for (i = 0; i < w; i++) {
-            int px = x + i, u, v, sx, sy;
-            u32 texel, a, r, g, b, dst, dr, dg, db;
+            int px = x + i, sx, sy;
+            u32 texel, a, r, g, b, dst;
             if (px < 0 || px >= W) continue;
             /* map dest (i,j) into sprite space with rotation */
             switch (rot & 3) {
@@ -171,20 +235,18 @@ void sg_sprite(int id, int x, int y, int w, int h, int tint, int alpha,
                     sx = j * sp->w / h;           sy = (w - 1 - i) * sp->h / w;
                     break;
             }
-            (void)u; (void)v;
             texel = sp->px[sy * sp->w + sx];
             a = (texel >> 24) & 0xFF;
             a = (a * (u32)alpha) >> 8;
             if (a == 0) continue;
-            r = ((texel >> 16) & 0xFF) * tr / 255;
-            g = ((texel >> 8) & 0xFF) * tg / 255;
-            b = (texel & 0xFF) * tb / 255;
+            r = mul255((texel >> 16) & 0xFF, tr);
+            g = mul255((texel >> 8) & 0xFF, tg);
+            b = mul255(texel & 0xFF, tb);
             dst = g_back[py * W + px];
-            dr = (dst >> 16) & 0xFF; dg = (dst >> 8) & 0xFF; db = dst & 0xFF;
-            dr = (r * a + dr * (255 - a)) / 255;
-            dg = (g * a + dg * (255 - a)) / 255;
-            db = (b * a + db * (255 - a)) / 255;
-            g_back[py * W + px] = (dr << 16) | (dg << 8) | db;
+            r = mul255(r, a) + mul255((dst >> 16) & 0xFF, 255 - a);
+            g = mul255(g, a) + mul255((dst >> 8) & 0xFF, 255 - a);
+            b = mul255(b, a) + mul255(dst & 0xFF, 255 - a);
+            g_back[py * W + px] = (r << 16) | (g << 8) | b;
         }
     }
 }
@@ -194,10 +256,7 @@ int sg_sprite_h(int id) { return (id >= 0 && id < SPRITE_COUNT) ? SPRITES[id].h 
 
 /* ---- present: back buffer -> framebuffer -------------------------------- */
 void sg_present(void) {
-    u32 W = gfx_width(), H = gfx_height(), y, x;
-    for (y = 0; y < H; y++)
-        for (x = 0; x < W; x++)
-            gfx_pixel(x, y, g_back[y * W + x]);
+    gfx_present(g_back);
 }
 
 /* ---- input / time / sound / debug --------------------------------------- */
