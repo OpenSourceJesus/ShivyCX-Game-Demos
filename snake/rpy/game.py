@@ -1749,26 +1749,46 @@ class Game:
         return 0
 
     def slide_snake(self, si: int, dx: int, dy: int) -> int:
-        s = self.snake(si)
-        j = 0
-        while j < s.npart():
-            tx = s.xs[j] + dx
-            ty = s.ys[j] + dy
-            if s.on_cell_any(tx, ty) == 0:
-                if self.wall_at(tx, ty) == 1:
+        """One ice step for a snake: push through anything it can shove."""
+        return self.try_push_snake(si, dx, dy, 1)
+
+    def slide_object(self, bx: int, bb: int, dx: int, dy: int) -> int:
+        """One ice step for a box (bx>=0) or bomb (bb>=0). Like the
+        original SlideStepObject: shove whatever is ahead if possible."""
+        if bx >= 0:
+            x = self.boxx[bx]
+            y = self.boxy[bx]
+        else:
+            x = self.bombx[bb]
+            y = self.bomby[bb]
+        nx = x + dx
+        ny = y + dy
+        if self.wall_at(nx, ny) == 1:
+            if bb >= 0:
+                self.queue_bomb(bb)
+            return 0
+        if self.apple_at(nx, ny) == 1:
+            return 0
+        if self.box_at(nx, ny) >= 0:
+            if self.try_push_at(nx, ny, dx, dy, 0, 1) == 0:
+                return 0
+        elif self.bomb_at(nx, ny) >= 0:
+            if self.try_push_at(nx, ny, dx, dy, 0, 1) == 0:
+                return 0
+        else:
+            oi = self.snake_at(nx, ny)
+            if oi >= 0:
+                if self.try_push_snake(oi, dx, dy, 1) == 0:
                     return 0
-                if self.apple_at(tx, ty) == 1:
-                    return 0
-                if self.box_at(tx, ty) >= 0:
-                    return 0
-                if self.bomb_at(tx, ty) >= 0:
-                    return 0
-                oi = self.snake_at(tx, ty)
-                if oi >= 0:
-                    if oi != si:
-                        return 0
-            j = j + 1
-        s.translate(dx, dy)
+        if bx >= 0:
+            self.boxx[bx] = nx
+            self.boxy[bx] = ny
+            self.move_box_connectables(bx, dx, dy)
+            self.object_landed(bx, -1)
+        else:
+            self.bombx[bb] = nx
+            self.bomby[bb] = ny
+            self.object_landed(-1, bb)
         return 1
 
     def resolve_slides(self, dx: int, dy: int) -> None:
@@ -1790,6 +1810,7 @@ class Game:
                     if self.slide_snake(si, dx, dy) == 1:
                         moved = 1
                         self.resolve_portals()
+                        self.flush_bombs()
                         self.check_pits()
                 order = order + 1
             # phase B: boxes and bombs standing on ice
@@ -1798,13 +1819,7 @@ class Game:
                 if self.boxlive[bi] == 1:
                     if self.boxz[bi] == 0:
                         if self.ice_at(self.boxx[bi], self.boxy[bi]) == 1:
-                            nx = self.boxx[bi] + dx
-                            ny = self.boxy[bi] + dy
-                            if self.cell_free(nx, ny, -1) == 1:
-                                self.boxx[bi] = nx
-                                self.boxy[bi] = ny
-                                self.move_box_connectables(bi, dx, dy)
-                                self.object_landed(bi, -1)
+                            if self.slide_object(bi, -1, dx, dy) == 1:
                                 moved = 1
                                 self.resolve_portals()
                                 self.flush_bombs()
@@ -1813,12 +1828,7 @@ class Game:
             while bi < len(self.bombx):
                 if self.bomblive[bi] == 1:
                     if self.ice_at(self.bombx[bi], self.bomby[bi]) == 1:
-                        nx = self.bombx[bi] + dx
-                        ny = self.bomby[bi] + dy
-                        if self.cell_free(nx, ny, -1) == 1:
-                            self.bombx[bi] = nx
-                            self.bomby[bi] = ny
-                            self.object_landed(-1, bi)
+                        if self.slide_object(-1, bi, dx, dy) == 1:
                             moved = 1
                             self.resolve_portals()
                             self.flush_bombs()
