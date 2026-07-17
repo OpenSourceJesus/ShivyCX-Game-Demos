@@ -78,11 +78,21 @@ class Instance:
         self.mods = {}                # (target_fid, propertyPath) -> value
         self.refs = {}                # (target_fid, propertyPath) -> objectRef
         self.name = "?"
+        self.valid = None             # target fids present in the prefab
+
+    def target_ok(self, t):
+        """Unity drops overrides whose target is not a document of the
+        source prefab (stale leftovers from converting an object to a
+        different prefab, e.g. scene 13's portals carry End-prefab
+        transform overrides). Mirror that."""
+        if self.valid is None:
+            return True
+        return t in self.valid
 
     def prop(self, path, default=0.0):
         """Any-target property lookup (root transform paths are unique)."""
-        for (_t, p), v in self.mods.items():
-            if p == path:
+        for (t, p), v in self.mods.items():
+            if p == path and self.target_ok(t):
                 try:
                     return float(v)
                 except ValueError:
@@ -145,6 +155,36 @@ def rnd(v):
     return int(round(v))
 
 
+_PREFAB_TARGETS = {}
+_FID_MASK = 0x7FFFFFFFFFFFFFFF
+
+
+def prefab_targets(path, guids):
+    """fileIDs a scene override may legally target in this prefab: its own
+    document anchors plus, recursively, every base/nested prefab's ids
+    composed the way Unity flattens them ((instance_fid ^ inner_fid)
+    masked to 63 bits)."""
+    if path in _PREFAB_TARGETS:
+        return _PREFAB_TARGETS[path]
+    ids = None
+    _PREFAB_TARGETS[path] = ids      # cycle guard
+    if path and os.path.exists(path):
+        text = open(path, encoding="utf-8", errors="replace").read()
+        ids = set()
+        for _cls, fid, _stripped, body in split_docs(text):
+            ids.add(fid)
+            if _cls != 1001:
+                continue
+            g = re.search(r"m_SourcePrefab: \{fileID: \d+, guid: "
+                          r"([0-9a-f]{32})", body)
+            inner = prefab_targets(guids.get(g.group(1), ""), guids) \
+                if g else None
+            if inner:
+                ids.update((fid ^ t) & _FID_MASK for t in inner)
+    _PREFAB_TARGETS[path] = ids
+    return ids
+
+
 def instance_pos(inst):
     """Root position of a prefab instance.
 
@@ -155,7 +195,7 @@ def instance_pos(inst):
     tgt = 0
     found = 0
     for (t, p) in inst.mods:
-        if p == "m_LocalPosition.x":
+        if p == "m_LocalPosition.x" and inst.target_ok(t):
             tgt = t
             found = 1
             break
@@ -168,6 +208,8 @@ def instance_pos(inst):
 
 def extract_level(scene_path, guids):
     instances, stripped = parse_scene(scene_path)
+    for inst in instances.values():
+        inst.valid = prefab_targets(guids.get(inst.guid, ""), guids)
 
     def pname(inst):
         p = guids.get(inst.guid, "")
@@ -232,7 +274,11 @@ def extract_level(scene_path, guids):
             for (t, p), ref in inst.refs.items():
                 if p == "other":
                     other = resolve(ref)
-            col = [inst.prop("lineColor." + c, d)
+            # Pair color: the Portal.lineColor field is only copied to the
+            # partner by an editor-time OnValidate and is often missing from
+            # one portal of a pair; the LineRenderer gradient is what both
+            # portals of a pair reliably serialize.
+            col = [inst.prop("m_Parameters.colorGradient.key0." + c, d)
                    for c, d in (("r", 0.0), ("g", 1.0), ("b", 1.0))]
             portals.append((fid, cx, cy, other, col, connected(inst)))
         elif name == "Weightpad":
