@@ -17,7 +17,7 @@ SCR_TITLE = 0
 SCR_SELECT = 1
 SCR_GAME = 2
 
-MAX_SNAKES = 3
+MAX_SNAKES = 6                          # 3 level slots + room for clones
 CRAWL_MS = 200          # 0.2 s per cell, the original moveSpeed=5
 WIN_HOLD_MS = 2000      # congrats hold, the original endAnimDur=2
 GROW_MS = 1000          # tail growth, the original growSpeed=1
@@ -166,6 +166,7 @@ class Game:
         self.porbox: "list[int]" = []       # -1 or box index (Connectable)
         self.pairlock: "list[int]" = []
         self.porocc: "list[int]" = []       # occupied at last resolution
+        self.entbuf: "list[int]" = []       # scratch: a snake's entry portals
 
         # movable Connectables (propel / save / load zones). Positions track
         # the box they are connectedTo; ice[] and zone[] are the lookup cache.
@@ -191,6 +192,9 @@ class Game:
         self.s0 = Snake()
         self.s1 = Snake()
         self.s2 = Snake()
+        self.s3 = Snake()                   # clone slots (portal duplicates)
+        self.s4 = Snake()
+        self.s5 = Snake()
         self.nsnakes = 0
         self.active = 0
 
@@ -237,7 +241,13 @@ class Game:
             return self.s0
         if i == 1:
             return self.s1
-        return self.s2
+        if i == 2:
+            return self.s2
+        if i == 3:
+            return self.s3
+        if i == 4:
+            return self.s4
+        return self.s5
 
     def idx(self, x: int, y: int) -> int:
         ix = x - self.minx
@@ -481,6 +491,9 @@ class Game:
         self.s0 = Snake()
         self.s1 = Snake()
         self.s2 = Snake()
+        self.s3 = Snake()
+        self.s4 = Snake()
+        self.s5 = Snake()
         self.nsnakes = 0
         self.active = 0
         self.turn = 0
@@ -803,6 +816,9 @@ class Game:
             d.append(self.bomby[i])
             d.append(self.bomblive[i])
             i = i + 1
+        # snake count varies at runtime (portal exit clones), so the
+        # snapshot carries it plus each snake's colour
+        d.append(self.nsnakes)
         i = 0
         while i < self.nsnakes:
             s = self.snake(i)
@@ -811,6 +827,9 @@ class Game:
             d.append(s.swarmed)
             d.append(s.fdx)
             d.append(s.fdy)
+            d.append(s.colr)
+            d.append(s.colg)
+            d.append(s.colb)
             d.append(s.npart())
             j = 0
             while j < s.npart():
@@ -889,16 +908,21 @@ class Game:
             self.bomblive[i] = d[k + 2]
             k = k + 3
             i = i + 1
+        ns = d[k]
+        k = k + 1
         i = 0
-        while i < self.nsnakes:
+        while i < ns:
             s = self.snake(i)
             s.alive = d[k]
             s.gone = d[k + 1]
             s.swarmed = d[k + 2]
             s.fdx = d[k + 3]
             s.fdy = d[k + 4]
-            np = d[k + 5]
-            k = k + 6
+            s.colr = d[k + 5]
+            s.colg = d[k + 6]
+            s.colb = d[k + 7]
+            np = d[k + 8]
+            k = k + 9
             s.xs = []
             s.ys = []
             s.zs = []
@@ -911,6 +935,18 @@ class Game:
                 j = j + 1
             s.snap_visual()
             i = i + 1
+        # clones past the restored count vanish (undo before their creation)
+        while i < self.nsnakes:
+            s = self.snake(i)
+            s.gone = 1
+            s.alive = 0
+            s.xs = []
+            s.ys = []
+            s.zs = []
+            i = i + 1
+        self.nsnakes = ns
+        if self.active >= ns:
+            self.active = 0
 
     # undo/redo entries are [corelen, core..., chklen, chk...] appended to a
     # flat int array; a parallel array holds each entry's total length. The
@@ -1295,19 +1331,18 @@ class Game:
         return -1
 
     def resolve_portals(self) -> None:
-        """Teleport entities that newly entered a portal cell."""
-        n = len(self.porx)
-        pi = 0
-        while pi < n:
-            oi = self.portal_other(pi)
-            if oi >= 0:
-                px = self.porx[pi]
-                py = self.pory[pi]
-                if self.porocc[pi] == 0:
-                    if self.pairlock[self.porpair[pi]] == 0:
-                        self.try_teleport(pi, oi, px, py)
-            pi = pi + 1
+        """Teleport entities that newly entered a portal cell. Mirrors the
+        original Portal.HandleTeleports(): passes repeat while something
+        teleports, so an arrival standing on another pair's portal chains
+        onward in the same turn; a snake entering portals of two pairs at
+        once exits from all of them and the extra exits are clones."""
+        guard = 0
+        while guard < 16:
+            if self.portal_pass() == 0:
+                break
+            guard = guard + 1
         # refresh occupancy + locks
+        n = len(self.porx)
         pi = 0
         while pi < n:
             self.porocc[pi] = self.solid_on(self.porx[pi], self.pory[pi])
@@ -1325,38 +1360,195 @@ class Game:
                 self.pairlock[pi] = 0
             pi = pi + 1
 
-    def try_teleport(self, pi: int, oi: int, px: int, py: int) -> None:
+    def portal_eligible(self, pi: int) -> int:
+        """Portal may fire: linked, freshly entered (cell was clear at the
+        last resolution), and its pair is not locked."""
+        if self.portal_other(pi) < 0:
+            return 0
+        if self.porocc[pi] == 1:
+            return 0
+        if self.pairlock[self.porpair[pi]] == 1:
+            return 0
+        return 1
+
+    def portal_pass(self) -> int:
+        """One HandleTeleport(): multi-portal snake exits (with clones)
+        first, then the first single teleport. 1 when something moved."""
+        blockmask = 0
+        si = 0
+        while si < self.nsnakes:
+            r = self.try_multi_teleport(si)
+            if r == 1:
+                return 1
+            if r == 2:
+                # conjugate-pair entry that cannot clone: applying just one
+                # delta would be wrong, so bar this snake from singles
+                blockmask = blockmask | (1 << si)
+            si = si + 1
+        n = len(self.porx)
+        pi = 0
+        while pi < n:
+            if self.portal_eligible(pi) == 1:
+                oi = self.portal_other(pi)
+                if self.try_teleport(pi, oi, self.porx[pi], self.pory[pi],
+                                     blockmask) == 1:
+                    return 1
+            pi = pi + 1
+        return 0
+
+    def snake_fits(self, si: int, dx: int, dy: int) -> int:
+        """1 if snake si translated by (dx,dy) lands on free cells."""
+        s = self.snake(si)
+        j = 0
+        while j < s.npart():
+            tx = s.xs[j] + dx
+            ty = s.ys[j] + dy
+            if self.wall_at(tx, ty) == 1:
+                return 0
+            if self.apple_at(tx, ty) == 1:
+                return 0
+            if self.box_at(tx, ty) >= 0:
+                return 0
+            if self.bomb_at(tx, ty) >= 0:
+                return 0
+            osnk = self.snake_at(tx, ty)
+            if osnk >= 0:
+                if osnk != si:
+                    return 0
+            j = j + 1
+        return 1
+
+    def images_collide(self, si: int, dxa: int, dya: int,
+                       dxb: int, dyb: int) -> int:
+        """1 when the two translated images of snake si share a cell."""
+        s = self.snake(si)
+        n = s.npart()
+        j = 0
+        while j < n:
+            k = 0
+            while k < n:
+                if s.xs[j] + dxa == s.xs[k] + dxb:
+                    if s.ys[j] + dya == s.ys[k] + dyb:
+                        return 1
+                k = k + 1
+            j = j + 1
+        return 0
+
+    def clone_snake(self, si: int, dx: int, dy: int) -> int:
+        """Duplicate snake si translated by (dx,dy); -1 when out of slots."""
+        if self.nsnakes >= MAX_SNAKES:
+            return -1
+        src = self.snake(si)
+        d = self.snake(self.nsnakes)
+        d.gone = 0
+        d.alive = src.alive
+        d.swarmed = src.swarmed
+        d.colr = src.colr
+        d.colg = src.colg
+        d.colb = src.colb
+        d.fdx = src.fdx
+        d.fdy = src.fdy
+        d.xs = []
+        d.ys = []
+        d.zs = []
+        d.vx = []
+        d.vy = []
+        j = 0
+        while j < src.npart():
+            d.xs.append(src.xs[j] + dx)
+            d.ys.append(src.ys[j] + dy)
+            d.zs.append(src.zs[j])
+            j = j + 1
+        d.snap_visual()
+        self.nsnakes = self.nsnakes + 1
+        return self.nsnakes - 1
+
+    def try_multi_teleport(self, si: int) -> int:
+        """Snake si standing on two or more eligible portals exits all of
+        them at once: the first entry moves the snake, every extra entry
+        spawns a clone (the original's TryMultiPortalSnakeTeleport).
+        Returns 0 no-op, 1 teleported, 2 infeasible conjugate entry (the
+        snake must not single-teleport this pass either)."""
+        s = self.snake(si)
+        if s.gone == 1:
+            return 0
+        if s.alive == 0:
+            return 0
+        self.entbuf = []
+        n = len(self.porx)
+        pi = 0
+        while pi < n:
+            if self.portal_eligible(pi) == 1:
+                if self.snake_at(self.porx[pi], self.pory[pi]) == si:
+                    self.entbuf.append(pi)
+            pi = pi + 1
+        if len(self.entbuf) < 2:
+            return 0
+        # feasibility: every exit image fits and no two images overlap
+        conj = 0
+        feasible = 1
+        a = 0
+        while a < len(self.entbuf):
+            ea = self.entbuf[a]
+            oa = self.portal_other(ea)
+            dxa = self.porx[oa] - self.porx[ea]
+            dya = self.pory[oa] - self.pory[ea]
+            if self.snake_fits(si, dxa, dya) == 0:
+                feasible = 0
+            b = a + 1
+            while b < len(self.entbuf):
+                eb = self.entbuf[b]
+                if self.porpair[eb] == self.porpair[ea]:
+                    conj = 1
+                ob = self.portal_other(eb)
+                dxb = self.porx[ob] - self.porx[eb]
+                dyb = self.pory[ob] - self.pory[eb]
+                if self.images_collide(si, dxa, dya, dxb, dyb) == 1:
+                    feasible = 0
+                b = b + 1
+            a = a + 1
+        if feasible == 0:
+            if conj == 1:
+                return 2
+            return 0
+        # commit: clones copy the pre-teleport shape, so make them before
+        # translating the original through the first entry
+        k = 1
+        while k < len(self.entbuf):
+            ek = self.entbuf[k]
+            ok = self.portal_other(ek)
+            ci = self.clone_snake(si, self.porx[ok] - self.porx[ek],
+                                  self.pory[ok] - self.pory[ek])
+            if ci >= 0:
+                self.pairlock[self.porpair[ek]] = 1
+                _log("[game] snake cloned through portal")
+            k = k + 1
+        e0 = self.entbuf[0]
+        o0 = self.portal_other(e0)
+        s.translate(self.porx[o0] - self.porx[e0],
+                    self.pory[o0] - self.pory[e0])
+        s.snap_visual()
+        self.pairlock[self.porpair[e0]] = 1
+        _log("[game] teleported")
+        return 1
+
+    def try_teleport(self, pi: int, oi: int, px: int, py: int,
+                     blockmask: int) -> int:
         dx = self.porx[oi] - px
         dy = self.pory[oi] - py
         si = self.snake_at(px, py)
         if si >= 0:
-            s = self.snake(si)
-            ok = 1
-            j = 0
-            while j < s.npart():
-                tx = s.xs[j] + dx
-                ty = s.ys[j] + dy
-                if self.wall_at(tx, ty) == 1:
-                    ok = 0
-                if self.apple_at(tx, ty) == 1:
-                    ok = 0
-                if self.box_at(tx, ty) >= 0:
-                    ok = 0
-                if self.bomb_at(tx, ty) >= 0:
-                    ok = 0
-                osnk = self.snake_at(tx, ty)
-                if osnk >= 0:
-                    if osnk != si:
-                        ok = 0
-                j = j + 1
-            if ok == 1:
+            if ((blockmask >> si) & 1) == 1:
+                return 0
+            if self.snake_fits(si, dx, dy) == 1:
+                s = self.snake(si)
                 s.translate(dx, dy)
                 s.snap_visual()
                 self.pairlock[self.porpair[pi]] = 1
                 _log("[game] teleported")
-            else:
-                self.mark_blocked(self.porx[oi], self.pory[oi])
-            return
+                return 1
+            self.mark_blocked(self.porx[oi], self.pory[oi])
+            return 0
         bx = self.box_at(px, py)
         if bx >= 0:
             if self.cell_free(px + dx, py + dy, -1) == 1:
@@ -1366,9 +1558,9 @@ class Game:
                 self.pairlock[self.porpair[pi]] = 1
                 self.object_landed(bx, -1)
                 _log("[game] box teleported")
-            else:
-                self.mark_blocked(self.porx[oi], self.pory[oi])
-            return
+                return 1
+            self.mark_blocked(self.porx[oi], self.pory[oi])
+            return 0
         bb = self.bomb_at(px, py)
         if bb >= 0:
             if self.cell_free(px + dx, py + dy, -1) == 1:
@@ -1376,10 +1568,19 @@ class Game:
                 self.bomby[bb] = py + dy
                 self.pairlock[self.porpair[pi]] = 1
                 self.object_landed(-1, bb)
-            else:
-                self.mark_blocked(self.porx[oi], self.pory[oi])
+                return 1
+            self.mark_blocked(self.porx[oi], self.pory[oi])
+        return 0
 
     def mark_blocked(self, x: int, y: int) -> None:
+        # chained passes retry blocked portals; keep one marker per cell
+        i = 0
+        while i < len(self.blockx):
+            if self.blockx[i] == x:
+                if self.blocky[i] == y:
+                    self.blockms[i] = engine.ms()
+                    return
+            i = i + 1
         self.blockx.append(x)
         self.blocky.append(y)
         self.blockms.append(engine.ms())
