@@ -141,7 +141,7 @@ class Game:
         self.ice: "list[int]" = []
         self.zone: "list[int]" = []         # 1 save, 2 load
         self.trapst: "list[int]" = []       # -1 none, 0 idle, 1 armed, 2 hot
-        self.doorpad: "list[int]" = []      # -1 or pad index
+        self.doorat: "list[int]" = []       # -1 or door index
 
         self.ax = 0
         self.ay = 0
@@ -170,11 +170,12 @@ class Game:
         self.pady: "list[int]" = []
         self.padcol: "list[int]" = []
         self.padpressed: "list[int]" = []
-        self.padopen: "list[int]" = []      # doors open?
+        self.padopen: "list[int]" = []      # pad toggle parity (0 at start)
         self.padpend: "list[int]" = []      # deferred toggles
         self.doorx: "list[int]" = []
         self.doory: "list[int]" = []
         self.doorpadidx: "list[int]" = []
+        self.dooropen0: "list[int]" = []    # door starts open (scene state)
 
         self.swarmx: "list[int]" = []
         self.swarmy: "list[int]" = []
@@ -243,6 +244,13 @@ class Game:
             return -1
         return iy * self.gw + ix
 
+    def door_open(self, dj: int) -> int:
+        """1 if door dj is open: its scene-start state XOR the pad's
+        toggle parity (Unity flips each door's activeSelf on toggle)."""
+        if self.dooropen0[dj] != self.padopen[self.doorpadidx[dj]]:
+            return 1
+        return 0
+
     def wall_at(self, x: int, y: int) -> int:
         """1 if a wall or closed door blocks the cell."""
         i = self.idx(x, y)
@@ -250,9 +258,9 @@ class Game:
             return 1                        # outside the board: solid
         if self.wall[i] > 0:
             return 1
-        p = self.doorpad[i]
-        if p >= 0:
-            if self.padopen[p] == 0:
+        dj = self.doorat[i]
+        if dj >= 0:
+            if self.door_open(dj) == 0:
                 return 1
         return 0
 
@@ -390,8 +398,8 @@ class Game:
                         nd = int(toks[6])
                         j = 0
                         while j < nd:
-                            x = int(toks[7 + 2 * j])
-                            y = int(toks[8 + 2 * j])
+                            x = int(toks[7 + 3 * j])
+                            y = int(toks[8 + 3 * j])
                             if x < minx:
                                 minx = x
                             if x > maxx:
@@ -416,7 +424,7 @@ class Game:
         self.ice = []
         self.zone = []
         self.trapst = []
-        self.doorpad = []
+        self.doorat = []
         i = 0
         while i < n:
             self.wall.append(0)
@@ -426,7 +434,7 @@ class Game:
             self.ice.append(0)
             self.zone.append(0)
             self.trapst.append(-1)
-            self.doorpad.append(-1)
+            self.doorat.append(-1)
             i = i + 1
 
         self.starx = []
@@ -454,6 +462,7 @@ class Game:
         self.doorx = []
         self.doory = []
         self.doorpadidx = []
+        self.dooropen0 = []
         self.swarmx = []
         self.swarmy = []
         self.s0 = Snake()
@@ -551,13 +560,14 @@ class Game:
                 nd = int(toks[6])
                 j = 0
                 while j < nd:
-                    dx = int(toks[7 + 2 * j])
-                    dy = int(toks[8 + 2 * j])
+                    dx = int(toks[7 + 3 * j])
+                    dy = int(toks[8 + 3 * j])
                     di = self.idx(dx, dy)
                     self.doorx.append(dx)
                     self.doory.append(dy)
                     self.doorpadidx.append(pi)
-                    self.doorpad[di] = pi
+                    self.dooropen0.append(int(toks[9 + 3 * j]))
+                    self.doorat[di] = len(self.doorx) - 1
                     j = j + 1
             elif op2 == "S":
                 if self.nsnakes < MAX_SNAKES:
@@ -601,7 +611,9 @@ class Game:
 
         self.ser()
         self._copybuf(0, 5)                 # snapbuf -> initdata
-        self._copybuf(0, 4)                 # snapbuf -> chkdata
+        # no checkpoint until a save zone triggers (empty chkdata = none,
+        # like the original's null checkpointState)
+        self._buf_clear(4)
         self.update_pads_initial()
         _log("[game] level " + str(idx + 1) + " start")
 
@@ -1443,25 +1455,27 @@ class Game:
             if now != self.padpressed[i]:
                 self.padpressed[i] = now
                 self.padpend[i] = self.padpend[i] + 1
-            # apply deferred toggles when legal
+            # apply deferred toggles when legal: every door that would
+            # close (currently open) must have a clear cell; doors that
+            # would open under an occupant are fine (Weightpad.cs
+            # CanToggleAllDoors).
             while self.padpend[i] > 0:
-                if self.padopen[i] == 1:
-                    # closing: every door cell must be clear
-                    ok = 1
-                    j = 0
-                    while j < len(self.doorx):
-                        if self.doorpadidx[j] == i:
+                ok = 1
+                j = 0
+                while j < len(self.doorx):
+                    if self.doorpadidx[j] == i:
+                        if self.door_open(j) == 1:
                             if self.solid_on(self.doorx[j],
                                              self.doory[j]) == 1:
                                 ok = 0
-                        j = j + 1
-                    if ok == 0:
-                        break
+                    j = j + 1
+                if ok == 0:
+                    break
+                if self.padopen[i] == 1:
                     self.padopen[i] = 0
-                    _log("[game] doors closed")
                 else:
                     self.padopen[i] = 1
-                    _log("[game] doors opened")
+                _log("[game] doors toggled")
                 self.padpend[i] = self.padpend[i] - 1
             i = i + 1
 
@@ -1568,9 +1582,10 @@ class Game:
             self._copybuf(0, 4)             # snapbuf -> chkdata
             _log("[game] checkpoint saved")
         elif li >= 0:
-            _log("[game] checkpoint loaded")
-            self._copybuf(4, 1)             # chkdata -> applybuf
-            self.apply_buf()
+            if len(self.chkdata) > 0:       # no save yet: do nothing
+                _log("[game] checkpoint loaded")
+                self._copybuf(4, 1)         # chkdata -> applybuf
+                self.apply_buf()
         self.update_traps_arming()
         self.update_swarms()
         self.check_pits()
@@ -1615,7 +1630,7 @@ class Game:
         self.rhistlen = []
         self._copybuf(5, 1)                 # initdata -> applybuf
         self.apply_buf()
-        self._copybuf(5, 4)                 # initdata -> chkdata
+        self._buf_clear(4)                  # reset also clears the checkpoint
         _log("[game] reset")
 
     def do_switch(self) -> None:
@@ -1706,6 +1721,24 @@ class Game:
     def cell_py(self, cy: int) -> int:
         return self.oy - cy * self.cell
 
+    def cspr(self, sid: int, px: int, py: int, wf: int, hf: int) -> None:
+        """Draw a sprite centred in the cell at (px, py), sized wf x hf in
+        1/256ths of a cell. Unity sizes each plain SpriteRenderer as
+        texture / pixelsPerUnit * prefab scale, so most objects do not
+        fill their whole cell."""
+        cell = self.cell
+        w = cell * wf // 256
+        h = cell * hf // 256
+        engine.sprite(sid, px + (cell - w) // 2, py + (cell - h) // 2, w, h)
+
+    def cspr_ex(self, sid: int, px: int, py: int, wf: int, hf: int,
+                tint: int, alpha: int, rot: int) -> None:
+        cell = self.cell
+        w = cell * wf // 256
+        h = cell * hf // 256
+        engine.sprite_ex(sid, px + (cell - w) // 2, py + (cell - h) // 2,
+                         w, h, tint, alpha, rot)
+
     def draw_board(self, tms: int) -> None:
         # static layer from the scene cache, animated entities on top
         if self.dirty == 1:
@@ -1745,10 +1778,8 @@ class Game:
                     if self.filled[i] == 1:
                         engine.rect_a(px, py, cell, cell, 4139348, 120)
                         if self.fillbox[i] >= 0:
-                            engine.sprite_ex(engine.SPR_BOX, px + cell // 8,
-                                             py + cell // 8,
-                                             cell * 3 // 4, cell * 3 // 4,
-                                             8421504, 256, 0)
+                            self.cspr_ex(engine.SPR_BOX, px, py, 179, 173,
+                                         8421504, 256, 0)
                     elif self.pit[i] == 1:
                         engine.sprite(engine.SPR_SHALLOW, px, py, cell, cell)
                     elif self.pit[i] == 2:
@@ -1768,13 +1799,13 @@ class Game:
                     if w == 5:
                         sid = engine.SPR_WEAKWALL
                     engine.sprite(sid, px, py, cell, wallh)
-                dp = self.doorpad[i]
-                if dp >= 0:
+                dj = self.doorat[i]
+                if dj >= 0:
                     a = 256
-                    if self.padopen[dp] == 1:
+                    if self.door_open(dj) == 1:
                         a = 96
                     engine.sprite_ex(engine.SPR_DOOR, px, py, cell, cell,
-                                     self.padcol[dp], a, 0)
+                                     self.padcol[self.doorpadidx[dj]], a, 0)
                 if self.trapst[i] >= 0:
                     engine.sprite(engine.SPR_TRAPDOOR, px, py, cell, cell)
                 x = x + 1
@@ -1787,7 +1818,8 @@ class Game:
             sid = engine.SPR_PAD
             if self.padpressed[i] == 1:
                 sid = engine.SPR_PADDOWN
-            engine.sprite_ex(sid, px, py, cell, cell, self.padcol[i], 256, 0)
+            # 300px art at 250 ppu, prefab scale 0.97 -> 1.164 cells
+            self.cspr_ex(sid, px, py, 298, 298, self.padcol[i], 256, 0)
             i = i + 1
         # portal pair links (rotating portal sprites are dynamic, order 250)
         i = 0
@@ -1819,29 +1851,34 @@ class Game:
 
     def draw_board_dynamic(self, tms: int) -> None:
         cell = self.cell
-        # rotating portal sprites (order 250)
+        # Cell-relative sprite sizes (1/256ths) below mirror Unity's
+        # texture / pixelsPerUnit * prefab scale for each object.
+        # rotating portal sprites (order 250), prefab scale 0.9
         i = 0
         while i < len(self.porx):
-            engine.sprite_ex(engine.SPR_PORTAL, self.cell_px(self.porx[i]),
-                             self.cell_py(self.pory[i]), cell, cell,
-                             self.porcol[i], 256, (tms // 300) & 3)
+            self.cspr_ex(engine.SPR_PORTAL, self.cell_px(self.porx[i]),
+                         self.cell_py(self.pory[i]), 230, 230,
+                         self.porcol[i], 256, (tms // 300) & 3)
             i = i + 1
         # apple (275) then boxes/bombs (300) -- above portals, below snakes.
         # Kept out of the static bake so rotating portals stay underneath.
-        engine.sprite(engine.SPR_APPLE, self.cell_px(self.ax),
-                      self.cell_py(self.ay), cell, cell)
+        # End prefab: 236x260 art at 260 ppu, scale 0.53
+        self.cspr(engine.SPR_APPLE, self.cell_px(self.ax),
+                  self.cell_py(self.ay), 123, 136)
         i = 0
         while i < len(self.boxx):
             if self.boxlive[i] == 1:
                 if self.boxz[i] == 0:
-                    engine.sprite(engine.SPR_BOX, self.cell_px(self.boxx[i]),
-                                  self.cell_py(self.boxy[i]), cell, cell)
+                    # Box prefab: 244x236 art at 244 ppu, scale 0.7
+                    self.cspr(engine.SPR_BOX, self.cell_px(self.boxx[i]),
+                              self.cell_py(self.boxy[i]), 179, 173)
             i = i + 1
         i = 0
         while i < len(self.bombx):
             if self.bomblive[i] == 1:
-                engine.sprite(engine.SPR_BOMB, self.cell_px(self.bombx[i]),
-                              self.cell_py(self.bomby[i]), cell, cell)
+                # Bomb prefab: 257x286 art at 286 ppu, scale 0.9
+                self.cspr(engine.SPR_BOMB, self.cell_px(self.bombx[i]),
+                          self.cell_py(self.bomby[i]), 207, 230)
             i = i + 1
         # snakes (order 300/302)
         si = 0
@@ -1856,8 +1893,9 @@ class Game:
             while x < self.minx + self.gw:
                 i = self.idx(x, y)
                 if self.ice[i] == 1:
-                    engine.sprite(engine.SPR_PROPEL, self.cell_px(x),
-                                  self.cell_py(y), cell, cell)
+                    # Propel Zone prefab: square art, scale 0.97
+                    self.cspr(engine.SPR_PROPEL, self.cell_px(x),
+                              self.cell_py(y), 248, 248)
                 x = x + 1
             y = y + 1
         i = 0
@@ -1865,6 +1903,7 @@ class Game:
             if self.swarmx[i] > -30000:
                 px = self.cell_px(self.swarmx[i])
                 py = self.cell_py(self.swarmy[i])
+                bw = cell * 38 // 256   # Bug prefab scale 0.15
                 b = 0
                 while b < 3:
                     ph = tms // 90 + b * 37 + i * 11
@@ -1873,7 +1912,7 @@ class Game:
                     engine.sprite(engine.SPR_BUG,
                                   px + cell // 8 + wx * (cell // 2) // 256,
                                   py + cell // 8 + wy * (cell // 2) // 256,
-                                  cell // 4, cell // 4)
+                                  bw, bw)
                     b = b + 1
             i = i + 1
         # Save/load zones (order 400) and stars (order 500) also sit above
@@ -1884,11 +1923,13 @@ class Game:
             while x < self.minx + self.gw:
                 i = self.idx(x, y)
                 if self.zone[i] == 1:
-                    engine.sprite(engine.SPR_SAVE, self.cell_px(x),
-                                  self.cell_py(y), cell, cell)
+                    # Save Icon: 340x393 at 393 ppu, zone scale 0.97
+                    self.cspr(engine.SPR_SAVE, self.cell_px(x),
+                              self.cell_py(y), 215, 248)
                 if self.zone[i] == 2:
-                    engine.sprite(engine.SPR_LOAD, self.cell_px(x),
-                                  self.cell_py(y), cell, cell)
+                    # Load Icon: 176x86 at 176 ppu, zone scale 0.97
+                    self.cspr(engine.SPR_LOAD, self.cell_px(x),
+                              self.cell_py(y), 248, 121)
                 x = x + 1
             y = y + 1
         i = 0
@@ -1897,9 +1938,10 @@ class Game:
                 a = 256
                 if self.stashed[self.levelidx] == 1:
                     a = 64                  # replay ghost, the original 1/4
-                engine.sprite_ex(engine.SPR_STAR, self.cell_px(self.starx[i]),
-                                 self.cell_py(self.stary[i]), cell, cell,
-                                 16777215, a, 0)
+                # Star prefab: 230x251 art at 251 ppu, scale 0.99
+                self.cspr_ex(engine.SPR_STAR, self.cell_px(self.starx[i]),
+                             self.cell_py(self.stary[i]), 232, 253,
+                             16777215, a, 0)
             i = i + 1
         # blocked-teleport indicators (fade out over a second)
         i = 0

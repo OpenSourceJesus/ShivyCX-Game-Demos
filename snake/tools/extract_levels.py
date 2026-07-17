@@ -223,13 +223,22 @@ def extract_level(scene_path, guids):
                    for c, d in (("r", 0.0), ("g", 1.0), ("b", 0.0))]
             rx = inst.prop_of(SNAKE_ROOT_TRS, "m_LocalPosition.x")
             ry = inst.prop_of(SNAKE_ROOT_TRS, "m_LocalPosition.y")
+            # An explicit parts.Array.size override is authoritative: Unity
+            # truncates the array to it and ignores stale data[i] overrides
+            # past the end (scene 2 keeps a leftover data[3]). Only infer
+            # the count from data indices when no size override exists.
             nparts = 2
+            size_override = 0
             for (t, p), v in inst.mods.items():
                 if p == "parts.Array.size":
-                    nparts = max(nparts, int(float(v)))
-                m = re.match(r"parts\.Array\.data\[(\d+)\]$", p)
-                if m and inst.refs.get((t, p)):
-                    nparts = max(nparts, int(m.group(1)) + 1)
+                    size_override = max(size_override, int(float(v)))
+            if size_override:
+                nparts = size_override
+            else:
+                for (t, p), v in inst.mods.items():
+                    m = re.match(r"parts\.Array\.data\[(\d+)\]$", p)
+                    if m and inst.refs.get((t, p)):
+                        nparts = max(nparts, int(m.group(1)) + 1)
             parts = []
             for i in range(nparts):
                 if i == 0:
@@ -257,12 +266,19 @@ def extract_level(scene_path, guids):
             vh = inst.prop("viewSize.y", 18.0)
             view = (vw, vh, x, y)
 
-    # door instances referenced by weightpads (Door prefab instances)
+    # door instances referenced by weightpads (Door prefab instances).
+    # A door whose GameObject starts inactive is an OPEN doorway; pad
+    # presses then flip it opposite to its siblings (Weightpad.cs toggles
+    # each door's activeSelf individually).
     door_pos = {}
     for fid, inst in instances.items():
         if pname(inst) == "Door":
             px, py = instance_pos(inst)
-            door_pos[fid] = (rnd(px), rnd(py))
+            starts_open = 0
+            for (_t, p), v in inst.mods.items():
+                if p == "m_IsActive" and v.strip() == "0":
+                    starts_open = 1
+            door_pos[fid] = (rnd(px), rnd(py), starts_open)
 
     out = []
     if view is None:
@@ -293,8 +309,8 @@ def extract_level(scene_path, guids):
         rec = "D %d %d %d %d %d %d" % (
             cx, cy, rnd(col[0] * 255), rnd(col[1] * 255), rnd(col[2] * 255),
             len(cells))
-        for dx, dy in cells:
-            rec += " %d %d" % (dx, dy)
+        for dx, dy, dopen in cells:
+            rec += " %d %d %d" % (dx, dy, dopen)
         out.append(rec)
 
     # active snake first: the original activates "Snake" (base name) first
