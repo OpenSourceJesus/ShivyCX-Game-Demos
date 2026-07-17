@@ -976,11 +976,15 @@ class Game:
     # nested checkpointState.
 
     def _bufs_equal(self, a: int, b: int) -> int:
+        """Compare snapshots ignoring element 0 (the turn counter): it is
+        bumped before the after-state is serialized, so including it would
+        make refused moves look like real turns and pollute the undo
+        history with duplicate states."""
         na = self._buf_len(a)
         nb = self._buf_len(b)
         if na != nb:
             return 0
-        i = 0
+        i = 1
         while i < na:
             if self._buf_get(a, i) != self._buf_get(b, i):
                 return 0
@@ -2011,7 +2015,7 @@ class Game:
         self.ser()
         self._hist_push(1, 0, 4)            # current state -> redo
         self._hist_pop_apply(0)
-        _log("[game] undo")
+        _log("[game] undo -> turn " + str(self.turn))
 
     def do_redo(self) -> None:
         if self.winning == 1:
