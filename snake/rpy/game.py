@@ -1790,17 +1790,16 @@ class Game:
                     engine.sprite(sid, px, py, cell, cell)
                 x = x + 1
             y = y + 1
-        # weightpads
+        # weightpads, tinted with the pad color over the whole sprite like
+        # the original's SpriteRenderer.color multiply
         i = 0
         while i < len(self.padx):
             px = self.cell_px(self.padx[i])
             py = self.cell_py(self.pady[i])
+            sid = engine.SPR_PAD
             if self.padpressed[i] == 1:
-                engine.sprite(engine.SPR_PADDOWN, px, py, cell, cell)
-            else:
-                engine.sprite(engine.SPR_PAD, px, py, cell, cell)
-            engine.rect_a(px + cell // 3, py + cell // 3, cell // 3,
-                          cell // 3, self.padcol[i], 130)
+                sid = engine.SPR_PADDOWN
+            engine.sprite_ex(sid, px, py, cell, cell, self.padcol[i], 256, 0)
             i = i + 1
         # portal pair links (the rotating portal sprites are dynamic)
         i = 0
