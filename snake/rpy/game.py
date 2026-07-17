@@ -163,8 +163,16 @@ class Game:
         self.pory: "list[int]" = []
         self.porpair: "list[int]" = []
         self.porcol: "list[int]" = []
+        self.porbox: "list[int]" = []       # -1 or box index (Connectable)
         self.pairlock: "list[int]" = []
         self.porocc: "list[int]" = []       # occupied at last resolution
+
+        # movable Connectables (propel / save / load zones). Positions track
+        # the box they are connectedTo; ice[] and zone[] are the lookup cache.
+        self.connx: "list[int]" = []
+        self.conny: "list[int]" = []
+        self.conntype: "list[int]" = []     # 1 propel, 2 save, 3 load
+        self.connbox: "list[int]" = []      # -1 or box index
 
         self.padx: "list[int]" = []
         self.pady: "list[int]" = []
@@ -451,8 +459,13 @@ class Game:
         self.pory = []
         self.porpair = []
         self.porcol = []
+        self.porbox = []
         self.pairlock = []
         self.porocc = []
+        self.connx = []
+        self.conny = []
+        self.conntype = []
+        self.connbox = []
         self.padx = []
         self.pady = []
         self.padcol = []
@@ -525,10 +538,31 @@ class Game:
                 self.starcol.append(0)
             elif op2 == "I":
                 self.ice[ci] = 1
+                self.connx.append(x)
+                self.conny.append(y)
+                self.conntype.append(1)
+                bi = -1
+                if len(toks) >= 4:
+                    bi = int(toks[3])
+                self.connbox.append(bi)
             elif op2 == "Y":
                 self.zone[ci] = 1
+                self.connx.append(x)
+                self.conny.append(y)
+                self.conntype.append(2)
+                bi = -1
+                if len(toks) >= 4:
+                    bi = int(toks[3])
+                self.connbox.append(bi)
             elif op2 == "L":
                 self.zone[ci] = 2
+                self.connx.append(x)
+                self.conny.append(y)
+                self.conntype.append(3)
+                bi = -1
+                if len(toks) >= 4:
+                    bi = int(toks[3])
+                self.connbox.append(bi)
             elif op2 == "H":
                 self.trapst[ci] = 0
             elif op2 == "G":
@@ -544,6 +578,10 @@ class Game:
                 b = int(toks[6])
                 self.porcol.append(r * 65536 + g * 256 + b)
                 self.porocc.append(0)
+                bi = -1
+                if len(toks) >= 8:
+                    bi = int(toks[7])
+                self.porbox.append(bi)
                 if pair >= npairs:
                     npairs = pair + 1
             elif op2 == "D":
@@ -736,6 +774,14 @@ class Game:
         n = len(self.porocc)
         while i < n:
             d.append(self.porocc[i])
+            d.append(self.porx[i])
+            d.append(self.pory[i])
+            i = i + 1
+        i = 0
+        n = len(self.connx)
+        while i < n:
+            d.append(self.connx[i])
+            d.append(self.conny[i])
             i = i + 1
         i = 0
         n = len(self.starx)
@@ -809,7 +855,16 @@ class Game:
         n = len(self.porocc)
         while i < n:
             self.porocc[i] = d[k]
-            k = k + 1
+            self.porx[i] = d[k + 1]
+            self.pory[i] = d[k + 2]
+            k = k + 3
+            i = i + 1
+        i = 0
+        n = len(self.connx)
+        while i < n:
+            self.connx[i] = d[k]
+            self.conny[i] = d[k + 1]
+            k = k + 2
             i = i + 1
         i = 0
         n = len(self.starx)
@@ -1071,6 +1126,7 @@ class Game:
         if bx >= 0:
             self.boxx[bx] = nx
             self.boxy[bx] = ny
+            self.move_box_connectables(bx, dx, dy)
             self.object_landed(bx, -1)
         else:
             self.bombx[bb] = nx
@@ -1102,6 +1158,53 @@ class Game:
         s.translate(dx, dy)
         _log("[game] snake pushed")
         return 1
+
+    def ice_at(self, x: int, y: int) -> int:
+        """1 if a propel zone currently covers (x, y)."""
+        i = 0
+        while i < len(self.connx):
+            if self.conntype[i] == 1:
+                if self.connx[i] == x:
+                    if self.conny[i] == y:
+                        return 1
+            i = i + 1
+        return 0
+
+    def zone_at(self, x: int, y: int) -> int:
+        """1 save / 2 load if a save/load zone covers (x, y), else 0."""
+        i = 0
+        while i < len(self.connx):
+            t = self.conntype[i]
+            if t >= 2:
+                if self.connx[i] == x:
+                    if self.conny[i] == y:
+                        return t - 1
+            i = i + 1
+        return 0
+
+    def move_box_connectables(self, bx: int, dx: int, dy: int) -> None:
+        """Translate every Connectable anchored to box bx by (dx, dy).
+
+        Mirrors Connectable.MoveWithConnectedToByDelta: portals and
+        propel/save/load zones keep their offset from the box.
+        """
+        if dx == 0:
+            if dy == 0:
+                return
+        i = 0
+        n = len(self.porx)
+        while i < n:
+            if self.porbox[i] == bx:
+                self.porx[i] = self.porx[i] + dx
+                self.pory[i] = self.pory[i] + dy
+            i = i + 1
+        i = 0
+        n = len(self.connx)
+        while i < n:
+            if self.connbox[i] == bx:
+                self.connx[i] = self.connx[i] + dx
+                self.conny[i] = self.conny[i] + dy
+            i = i + 1
 
     def object_landed(self, bx: int, bb: int) -> None:
         """Pit interactions for a box/bomb that arrived on a new cell."""
@@ -1259,6 +1362,7 @@ class Game:
             if self.cell_free(px + dx, py + dy, -1) == 1:
                 self.boxx[bx] = px + dx
                 self.boxy[bx] = py + dy
+                self.move_box_connectables(bx, dx, dy)
                 self.pairlock[self.porpair[pi]] = 1
                 self.object_landed(bx, -1)
                 _log("[game] box teleported")
@@ -1290,10 +1394,8 @@ class Game:
             return 0
         j = 0
         while j < s.npart():
-            i = self.idx(s.xs[j], s.ys[j])
-            if i >= 0:
-                if self.ice[i] == 1:
-                    return 1
+            if self.ice_at(s.xs[j], s.ys[j]) == 1:
+                return 1
             j = j + 1
         return 0
 
@@ -1346,32 +1448,29 @@ class Game:
             while bi < len(self.boxx):
                 if self.boxlive[bi] == 1:
                     if self.boxz[bi] == 0:
-                        i = self.idx(self.boxx[bi], self.boxy[bi])
-                        if i >= 0:
-                            if self.ice[i] == 1:
-                                nx = self.boxx[bi] + dx
-                                ny = self.boxy[bi] + dy
-                                if self.cell_free(nx, ny, -1) == 1:
-                                    self.boxx[bi] = nx
-                                    self.boxy[bi] = ny
-                                    self.object_landed(bi, -1)
-                                    moved = 1
-                                    self.resolve_portals()
+                        if self.ice_at(self.boxx[bi], self.boxy[bi]) == 1:
+                            nx = self.boxx[bi] + dx
+                            ny = self.boxy[bi] + dy
+                            if self.cell_free(nx, ny, -1) == 1:
+                                self.boxx[bi] = nx
+                                self.boxy[bi] = ny
+                                self.move_box_connectables(bi, dx, dy)
+                                self.object_landed(bi, -1)
+                                moved = 1
+                                self.resolve_portals()
                 bi = bi + 1
             bi = 0
             while bi < len(self.bombx):
                 if self.bomblive[bi] == 1:
-                    i = self.idx(self.bombx[bi], self.bomby[bi])
-                    if i >= 0:
-                        if self.ice[i] == 1:
-                            nx = self.bombx[bi] + dx
-                            ny = self.bomby[bi] + dy
-                            if self.cell_free(nx, ny, -1) == 1:
-                                self.bombx[bi] = nx
-                                self.bomby[bi] = ny
-                                self.object_landed(-1, bi)
-                                moved = 1
-                                self.resolve_portals()
+                    if self.ice_at(self.bombx[bi], self.bomby[bi]) == 1:
+                        nx = self.bombx[bi] + dx
+                        ny = self.bomby[bi] + dy
+                        if self.cell_free(nx, ny, -1) == 1:
+                            self.bombx[bi] = nx
+                            self.bomby[bi] = ny
+                            self.object_landed(-1, bi)
+                            moved = 1
+                            self.resolve_portals()
                 bi = bi + 1
             if moved == 0:
                 return
@@ -1562,26 +1661,22 @@ class Game:
         self.update_pads()
         # save zones win over load zones in the same turn
         saved = 0
-        li = -1
-        n = self.gw * self.gh
+        loaded = 0
         i = 0
-        while i < n:
-            if self.zone[i] == 1:
-                x = self.minx + i - (i // self.gw) * self.gw
-                y = self.miny + i // self.gw
-                if self.solid_on(x, y) == 1:
-                    saved = 1
-            if self.zone[i] == 2:
-                x = self.minx + i - (i // self.gw) * self.gw
-                y = self.miny + i // self.gw
-                if self.solid_on(x, y) == 1:
-                    li = i
+        while i < len(self.connx):
+            t = self.conntype[i]
+            if t >= 2:
+                if self.solid_on(self.connx[i], self.conny[i]) == 1:
+                    if t == 2:
+                        saved = 1
+                    else:
+                        loaded = 1
             i = i + 1
         if saved == 1:
             self.ser()
             self._copybuf(0, 4)             # snapbuf -> chkdata
             _log("[game] checkpoint saved")
-        elif li >= 0:
+        elif loaded == 1:
             if len(self.chkdata) > 0:       # no save yet: do nothing
                 _log("[game] checkpoint loaded")
                 self._copybuf(4, 1)         # chkdata -> applybuf
@@ -1887,17 +1982,13 @@ class Game:
             si = si + 1
         # Bugs and the foreground renderer of propel zones are order 400 in
         # the Unity prefabs, so both belong in front of snakes.
-        y = self.miny
-        while y < self.miny + self.gh:
-            x = self.minx
-            while x < self.minx + self.gw:
-                i = self.idx(x, y)
-                if self.ice[i] == 1:
-                    # Propel Zone prefab: square art, scale 0.97
-                    self.cspr(engine.SPR_PROPEL, self.cell_px(x),
-                              self.cell_py(y), 248, 248)
-                x = x + 1
-            y = y + 1
+        i = 0
+        while i < len(self.connx):
+            if self.conntype[i] == 1:
+                # Propel Zone prefab: square art, scale 0.97
+                self.cspr(engine.SPR_PROPEL, self.cell_px(self.connx[i]),
+                          self.cell_py(self.conny[i]), 248, 248)
+            i = i + 1
         i = 0
         while i < len(self.swarmx):
             if self.swarmx[i] > -30000:
@@ -1917,21 +2008,18 @@ class Game:
             i = i + 1
         # Save/load zones (order 400) and stars (order 500) also sit above
         # snakes in the original.
-        y = self.miny
-        while y < self.miny + self.gh:
-            x = self.minx
-            while x < self.minx + self.gw:
-                i = self.idx(x, y)
-                if self.zone[i] == 1:
-                    # Save Icon: 340x393 at 393 ppu, zone scale 0.97
-                    self.cspr(engine.SPR_SAVE, self.cell_px(x),
-                              self.cell_py(y), 215, 248)
-                if self.zone[i] == 2:
-                    # Load Icon: 176x86 at 176 ppu, zone scale 0.97
-                    self.cspr(engine.SPR_LOAD, self.cell_px(x),
-                              self.cell_py(y), 248, 121)
-                x = x + 1
-            y = y + 1
+        i = 0
+        while i < len(self.connx):
+            t = self.conntype[i]
+            if t == 2:
+                # Save Icon: 340x393 at 393 ppu, zone scale 0.97
+                self.cspr(engine.SPR_SAVE, self.cell_px(self.connx[i]),
+                          self.cell_py(self.conny[i]), 215, 248)
+            if t == 3:
+                # Load Icon: 176x86 at 176 ppu, zone scale 0.97
+                self.cspr(engine.SPR_LOAD, self.cell_px(self.connx[i]),
+                          self.cell_py(self.conny[i]), 248, 121)
+            i = i + 1
         i = 0
         while i < len(self.starx):
             if self.starcol[i] == 0:

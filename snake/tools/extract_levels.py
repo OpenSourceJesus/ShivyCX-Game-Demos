@@ -146,7 +146,24 @@ def rnd(v):
 
 
 def instance_pos(inst):
-    return (inst.prop("m_LocalPosition.x"), inst.prop("m_LocalPosition.y"))
+    """Root position of a prefab instance.
+
+    Instances can override child transforms too (e.g. Trapdoor's graphics
+    child carries an m_LocalPosition.y of its own), so x and y must come
+    from the same target: the transform that owns the x override.
+    """
+    tgt = 0
+    found = 0
+    for (t, p) in inst.mods:
+        if p == "m_LocalPosition.x":
+            tgt = t
+            found = 1
+            break
+    if not found:
+        return (inst.prop("m_LocalPosition.x"),
+                inst.prop("m_LocalPosition.y"))
+    return (inst.prop_of(tgt, "m_LocalPosition.x"),
+            inst.prop_of(tgt, "m_LocalPosition.y"))
 
 
 def extract_level(scene_path, guids):
@@ -166,7 +183,16 @@ def extract_level(scene_path, guids):
 
     recs, portals, snakes, pads = [], [], [], []
     boxes = []
+    zones = []          # (letter, cx, cy, connected fid) emitted post-loop
     view = None
+
+    def connected(inst):
+        """PrefabInstance fid this Connectable's connectedTo anchors to."""
+        for (_t, p), ref in inst.refs.items():
+            if p == "connectedTo":
+                return resolve(ref)
+        return 0
+
     for fid, inst in sorted(instances.items()):
         name = pname(inst)
         inst.name = name
@@ -183,7 +209,7 @@ def extract_level(scene_path, guids):
         elif name == "Bottomless Pit":
             recs.append("P %d %d 2" % (cx, cy))
         elif name == "Box":
-            boxes.append(fid)
+            boxes.append((fid, cx, cy))
             recs.append("O %d %d" % (cx, cy))
         elif name == "Bomb":
             recs.append("M %d %d" % (cx, cy))
@@ -192,11 +218,11 @@ def extract_level(scene_path, guids):
         elif name == "Star":
             recs.append("* %d %d" % (cx, cy))
         elif name == "Propel Zone":
-            recs.append("I %d %d" % (cx, cy))
+            zones.append(("I", cx, cy, connected(inst)))
         elif name == "Save Zone":
-            recs.append("Y %d %d" % (cx, cy))
+            zones.append(("Y", cx, cy, connected(inst)))
         elif name == "Load Zone":
-            recs.append("L %d %d" % (cx, cy))
+            zones.append(("L", cx, cy, connected(inst)))
         elif name == "Trapdoor":
             recs.append("H %d %d" % (cx, cy))
         elif name == "Bug Swarm":
@@ -208,7 +234,7 @@ def extract_level(scene_path, guids):
                     other = resolve(ref)
             col = [inst.prop("lineColor." + c, d)
                    for c, d in (("r", 0.0), ("g", 1.0), ("b", 1.0))]
-            portals.append((fid, cx, cy, other, col))
+            portals.append((fid, cx, cy, other, col, connected(inst)))
         elif name == "Weightpad":
             doors = []
             for (t, p), ref in sorted(inst.refs.items(),
@@ -280,16 +306,27 @@ def extract_level(scene_path, guids):
                     starts_open = 1
             door_pos[fid] = (rnd(px), rnd(py), starts_open)
 
+    # PrefabInstance fids of Box records, in the same order the O lines
+    # appear after sorted(recs) -- string sort of "O x y", so zone/portal
+    # box indices match the order load_level appends into boxx/boxy.
+    box_idx = {}
+    for i, (fid, _cx, _cy) in enumerate(
+            sorted(boxes, key=lambda t: "O %d %d" % (t[1], t[2]))):
+        box_idx[fid] = i
+
     out = []
     if view is None:
         view = (32.0, 18.0, 0.0, 0.0)
     out.append("V %d %d %d %d" % (rnd(view[0]), rnd(view[1]),
                                   rnd(view[2] * 100), rnd(view[3] * 100)))
     out.extend(sorted(recs))
+    for letter, cx, cy, cfid in sorted(zones):
+        bi = box_idx.get(cfid, -1) if cfid else -1
+        out.append("%s %d %d %d" % (letter, cx, cy, bi))
 
     pair_of = {}
     nextpair = 0
-    for fid, cx, cy, other, col in portals:
+    for fid, cx, cy, other, col, cfid in portals:
         if fid in pair_of:
             pid = pair_of[fid]
         elif other and other in pair_of:
@@ -300,9 +337,10 @@ def extract_level(scene_path, guids):
         pair_of[fid] = pid
         if other:
             pair_of.setdefault(other, pid)
-        out.append("R %d %d %d %d %d %d" % (
+        bi = box_idx.get(cfid, -1) if cfid else -1
+        out.append("R %d %d %d %d %d %d %d" % (
             cx, cy, pid,
-            rnd(col[0] * 255), rnd(col[1] * 255), rnd(col[2] * 255)))
+            rnd(col[0] * 255), rnd(col[1] * 255), rnd(col[2] * 255), bi))
 
     for fid, cx, cy, doors, col in pads:
         cells = [door_pos[d] for d in doors if d in door_pos]
