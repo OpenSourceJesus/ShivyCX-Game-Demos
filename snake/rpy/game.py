@@ -159,6 +159,10 @@ class Game:
         self.bombx: "list[int]" = []
         self.bomby: "list[int]" = []
         self.bomblive: "list[int]" = []
+        # pit-triggered blasts wait for the move to finish (the original
+        # queues in Pit/TryPush and flushes at the end of Snake.Move), so
+        # the pusher ends up inside the 3x3 blast zone before it fires
+        self.bombq: "list[int]" = []
 
         self.porx: "list[int]" = []
         self.pory: "list[int]" = []
@@ -466,6 +470,7 @@ class Game:
         self.bombx = []
         self.bomby = []
         self.bomblive = []
+        self.bombq = []
         self.porx = []
         self.pory = []
         self.porpair = []
@@ -1034,6 +1039,25 @@ class Game:
                 return 1
         return 0
 
+    def queue_bomb(self, bb: int) -> None:
+        """The original Bomb.QueueExplosion: pit-landing and wall-squeeze
+        blasts are deferred to the end of the move, so pushers that follow
+        into the blast zone are hit too."""
+        if self.bomblive[bb] == 0:
+            return
+        i = 0
+        while i < len(self.bombq):
+            if self.bombq[i] == bb:
+                return
+            i = i + 1
+        self.bombq.append(bb)
+
+    def flush_bombs(self) -> None:
+        """The original Bomb.FlushExplosionQueue."""
+        while len(self.bombq) > 0:
+            bb = self.bombq.pop()
+            self.explode(bb, 0)
+
     def explode(self, bi: int, depth: int) -> None:
         if self.bomblive[bi] == 0:
             return
@@ -1193,7 +1217,7 @@ class Game:
         # box/bomb chain
         if self.wall_at(nx, ny) == 1:
             if bb >= 0:
-                self.explode(bb, 0)         # bomb against a wall blows up
+                self.queue_bomb(bb)         # bomb against a wall blows up
             return 0
         if self.apple_at(nx, ny) == 1:
             return 0
@@ -1207,7 +1231,7 @@ class Game:
         if blocked == 1:
             if self.try_push_at(nx, ny, dx, dy, depth + 1) == 0:
                 if bb >= 0:
-                    self.explode(bb, 0)
+                    self.queue_bomb(bb)
                 return 0
         if bx >= 0:
             self.boxx[bx] = nx
@@ -1312,9 +1336,9 @@ class Game:
             y = self.bomby[bb]
             t = self.pit_open_at(x, y)
             if t == 1:
-                self.explode(bb, 0)
+                self.queue_bomb(bb)
             elif t == 2:
-                self.explode(bb, 0)
+                self.queue_bomb(bb)
             elif t == 3:
                 self.bomblive[bb] = 0
 
@@ -1710,6 +1734,7 @@ class Game:
                                 self.object_landed(bi, -1)
                                 moved = 1
                                 self.resolve_portals()
+                                self.flush_bombs()
                 bi = bi + 1
             bi = 0
             while bi < len(self.bombx):
@@ -1723,6 +1748,7 @@ class Game:
                             self.object_landed(-1, bi)
                             moved = 1
                             self.resolve_portals()
+                            self.flush_bombs()
                 bi = bi + 1
             if moved == 0:
                 return
@@ -1858,6 +1884,7 @@ class Game:
                 bb = self.bomb_at(x, y)
                 if bb >= 0:
                     self.object_landed(-1, bb)
+                self.flush_bombs()          # Trapdoor.cs flushes on opening
                 self.check_pits()
             i = i + 1
         i = 0
@@ -1902,14 +1929,29 @@ class Game:
         if r == 2:
             return                          # won: no history
         if r == 0:
-            self.turn = self.turn - 1
-            return                          # refused, nothing changed
+            # a refused push can still have squeezed a bomb against a
+            # wall; the queued blast fires and the turn commits
+            self.flush_bombs()
+            self.ser()
+            if self._bufs_equal(2, 0) == 1:
+                self.turn = self.turn - 1
+                return                      # refused, nothing changed
+            self.check_pits()
+            self.update_pads()
+            self.ser()
+            self._hist_push(0, 2, 3)
+            self.rhist = []
+            self.rhistlen = []
+            _log("[game] turn " + str(self.turn))
+            return
         self.lastdx = dx
         self.lastdy = dy
         self.resolve_portals()
+        self.flush_bombs()                  # end-of-move blasts (pit bombs)
         self.check_pits()
         self.resolve_slides(dx, dy)
         self.resolve_portals()
+        self.flush_bombs()
         self.update_pads()
         # save zones win over load zones in the same turn
         saved = 0
