@@ -1348,14 +1348,30 @@ class Game:
         _log("[game] snake pushed")
         return 1
 
-    def ice_at(self, x: int, y: int) -> int:
-        """1 if a propel zone currently covers (x, y)."""
+    def ice_zone_depth(self, ci: int) -> int:
+        """Depth of propel zone ci: follows its connected box into pits.
+
+        Like Unity PropelZoneAt same-z matching: a zone on a fallen box
+        (boxz>0) only rides entities at that depth. Dead carriers yield -1
+        (zone is not rideable).
+        """
+        bi = self.connbox[ci]
+        if bi < 0:
+            return 0
+        if self.boxlive[bi] == 0:
+            return -1
+        return self.boxz[bi]
+
+    def ice_at(self, x: int, y: int, z: int) -> int:
+        """1 if a propel zone at depth z covers (x, y)."""
         i = 0
         while i < len(self.connx):
             if self.conntype[i] == 1:
                 if self.connx[i] == x:
                     if self.conny[i] == y:
-                        return 1
+                        d = self.ice_zone_depth(i)
+                        if d == z:
+                            return 1
             i = i + 1
         return 0
 
@@ -1749,33 +1765,35 @@ class Game:
             return 0
         j = 0
         while j < s.npart():
-            if self.ice_at(s.xs[j], s.ys[j]) == 1:
+            if self.ice_at(s.xs[j], s.ys[j], s.zs[j]) == 1:
                 return 1
             j = j + 1
         return 0
 
-    def propel_bit_at(self, x: int, y: int) -> int:
-        """Bit index among propel zones covering (x,y), or -1."""
+    def propel_bit_at(self, x: int, y: int, z: int) -> int:
+        """Bit index among same-depth propel zones covering (x,y), or -1."""
         bit = 0
         i = 0
         while i < len(self.connx):
             if self.conntype[i] == 1:
                 if self.connx[i] == x:
                     if self.conny[i] == y:
-                        return bit
+                        d = self.ice_zone_depth(i)
+                        if d == z:
+                            return bit
                 bit = bit + 1
             i = i + 1
         return -1
 
     def snake_ice_mask(self, si: int) -> int:
-        """Bitmask of propel zones currently under any part of snake si."""
+        """Bitmask of same-depth propel zones under any part of snake si."""
         s = self.snake(si)
         if s.gone == 1:
             return 0
         mask = 0
         j = 0
         while j < s.npart():
-            b = self.propel_bit_at(s.xs[j], s.ys[j])
+            b = self.propel_bit_at(s.xs[j], s.ys[j], s.zs[j])
             if b >= 0:
                 mask = mask | (1 << b)
             j = j + 1
@@ -1798,10 +1816,10 @@ class Game:
         while i < len(self.boxx):
             mask = 0
             if self.boxlive[i] == 1:
-                if self.boxz[i] == 0:
-                    b = self.propel_bit_at(self.boxx[i], self.boxy[i])
-                    if b >= 0:
-                        mask = 1 << b
+                b = self.propel_bit_at(self.boxx[i], self.boxy[i],
+                                       self.boxz[i])
+                if b >= 0:
+                    mask = 1 << b
             self.icebox.append(mask)
             i = i + 1
         self.icebomb = []
@@ -1809,7 +1827,7 @@ class Game:
         while i < len(self.bombx):
             mask = 0
             if self.bomblive[i] == 1:
-                b = self.propel_bit_at(self.bombx[i], self.bomby[i])
+                b = self.propel_bit_at(self.bombx[i], self.bomby[i], 0)
                 if b >= 0:
                     mask = 1 << b
             self.icebomb.append(mask)
@@ -1846,7 +1864,7 @@ class Game:
         start = self.ice_start_snake(si)
         j = 0
         while j < s.npart():
-            b = self.propel_bit_at(s.xs[j], s.ys[j])
+            b = self.propel_bit_at(s.xs[j], s.ys[j], s.zs[j])
             if b >= 0:
                 if ((start >> b) & 1) == 0:
                     return 1
@@ -1856,9 +1874,7 @@ class Game:
     def entered_ice_box(self, bi: int) -> int:
         if self.boxlive[bi] == 0:
             return 0
-        if self.boxz[bi] != 0:
-            return 0
-        b = self.propel_bit_at(self.boxx[bi], self.boxy[bi])
+        b = self.propel_bit_at(self.boxx[bi], self.boxy[bi], self.boxz[bi])
         if b < 0:
             return 0
         if ((self.ice_start_box(bi) >> b) & 1) == 0:
@@ -1868,7 +1884,7 @@ class Game:
     def entered_ice_bomb(self, bi: int) -> int:
         if self.bomblive[bi] == 0:
             return 0
-        b = self.propel_bit_at(self.bombx[bi], self.bomby[bi])
+        b = self.propel_bit_at(self.bombx[bi], self.bomby[bi], 0)
         if b < 0:
             return 0
         if ((self.ice_start_bomb(bi) >> b) & 1) == 0:
@@ -1966,16 +1982,12 @@ class Game:
                 if bi < len(coastb):
                     if coastb[bi] == 1:
                         if self.boxlive[bi] == 1:
-                            if self.boxz[bi] == 0:
-                                if self.ice_at(self.boxx[bi],
-                                               self.boxy[bi]) == 1:
-                                    if self.slide_object(bi, -1,
-                                                         dx, dy) == 1:
-                                        moved = 1
-                                        self.resolve_portals()
-                                        self.flush_bombs()
-                                else:
-                                    coastb[bi] = 0
+                            if self.ice_at(self.boxx[bi], self.boxy[bi],
+                                           self.boxz[bi]) == 1:
+                                if self.slide_object(bi, -1, dx, dy) == 1:
+                                    moved = 1
+                                    self.resolve_portals()
+                                    self.flush_bombs()
                             else:
                                 coastb[bi] = 0
                         else:
@@ -1986,8 +1998,8 @@ class Game:
                 if bi < len(coastm):
                     if coastm[bi] == 1:
                         if self.bomblive[bi] == 1:
-                            if self.ice_at(self.bombx[bi],
-                                           self.bomby[bi]) == 1:
+                            if self.ice_at(self.bombx[bi], self.bomby[bi],
+                                           0) == 1:
                                 if self.slide_object(-1, bi, dx, dy) == 1:
                                     moved = 1
                                     self.resolve_portals()
