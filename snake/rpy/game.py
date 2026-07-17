@@ -203,6 +203,12 @@ class Game:
         self.nsnakes = 0
         self.active = 0
         self.pushmask = 0                   # snakes currently in a push chain
+        # turn-start propel-zone bitmasks (bit = index among type-1 zones).
+        # Coast only when an entity overlaps a zone it did not already cover
+        # at turn start (enter ice, or step from zone A onto zone B).
+        self.icesnake: "list[int]" = []
+        self.icebox: "list[int]" = []
+        self.icebomb: "list[int]" = []
 
         self.turn = 0
         self.lastdx = 0
@@ -1748,6 +1754,127 @@ class Game:
             j = j + 1
         return 0
 
+    def propel_bit_at(self, x: int, y: int) -> int:
+        """Bit index among propel zones covering (x,y), or -1."""
+        bit = 0
+        i = 0
+        while i < len(self.connx):
+            if self.conntype[i] == 1:
+                if self.connx[i] == x:
+                    if self.conny[i] == y:
+                        return bit
+                bit = bit + 1
+            i = i + 1
+        return -1
+
+    def snake_ice_mask(self, si: int) -> int:
+        """Bitmask of propel zones currently under any part of snake si."""
+        s = self.snake(si)
+        if s.gone == 1:
+            return 0
+        mask = 0
+        j = 0
+        while j < s.npart():
+            b = self.propel_bit_at(s.xs[j], s.ys[j])
+            if b >= 0:
+                mask = mask | (1 << b)
+            j = j + 1
+        return mask
+
+    def capture_ice_start(self) -> None:
+        """Snapshot which propel zones each entity already covers.
+
+        Like the original EnteredNewPropelZone: coast when overlapping a
+        zone that was not under the entity at turn start. Staying on the
+        same zone does not coast; stepping onto a different zone does.
+        """
+        self.icesnake = []
+        i = 0
+        while i < self.nsnakes:
+            self.icesnake.append(self.snake_ice_mask(i))
+            i = i + 1
+        self.icebox = []
+        i = 0
+        while i < len(self.boxx):
+            mask = 0
+            if self.boxlive[i] == 1:
+                if self.boxz[i] == 0:
+                    b = self.propel_bit_at(self.boxx[i], self.boxy[i])
+                    if b >= 0:
+                        mask = 1 << b
+            self.icebox.append(mask)
+            i = i + 1
+        self.icebomb = []
+        i = 0
+        while i < len(self.bombx):
+            mask = 0
+            if self.bomblive[i] == 1:
+                b = self.propel_bit_at(self.bombx[i], self.bomby[i])
+                if b >= 0:
+                    mask = 1 << b
+            self.icebomb.append(mask)
+            i = i + 1
+
+    def ice_start_snake(self, si: int) -> int:
+        if si < 0:
+            return 0
+        if si >= len(self.icesnake):
+            return 0
+        return self.icesnake[si]
+
+    def ice_start_box(self, bi: int) -> int:
+        if bi < 0:
+            return 0
+        if bi >= len(self.icebox):
+            return 0
+        return self.icebox[bi]
+
+    def ice_start_bomb(self, bi: int) -> int:
+        if bi < 0:
+            return 0
+        if bi >= len(self.icebomb):
+            return 0
+        return self.icebomb[bi]
+
+    def entered_ice_snake(self, si: int) -> int:
+        """1 if the snake overlaps any propel zone it did not at turn start."""
+        s = self.snake(si)
+        if s.gone == 1:
+            return 0
+        if s.alive == 0:
+            return 0
+        start = self.ice_start_snake(si)
+        j = 0
+        while j < s.npart():
+            b = self.propel_bit_at(s.xs[j], s.ys[j])
+            if b >= 0:
+                if ((start >> b) & 1) == 0:
+                    return 1
+            j = j + 1
+        return 0
+
+    def entered_ice_box(self, bi: int) -> int:
+        if self.boxlive[bi] == 0:
+            return 0
+        if self.boxz[bi] != 0:
+            return 0
+        b = self.propel_bit_at(self.boxx[bi], self.boxy[bi])
+        if b < 0:
+            return 0
+        if ((self.ice_start_box(bi) >> b) & 1) == 0:
+            return 1
+        return 0
+
+    def entered_ice_bomb(self, bi: int) -> int:
+        if self.bomblive[bi] == 0:
+            return 0
+        b = self.propel_bit_at(self.bombx[bi], self.bomby[bi])
+        if b < 0:
+            return 0
+        if ((self.ice_start_bomb(bi) >> b) & 1) == 0:
+            return 1
+        return 0
+
     def slide_snake(self, si: int, dx: int, dy: int) -> int:
         """One ice step for a snake: push through anything it can shove."""
         return self.try_push_snake(si, dx, dy, 1)
@@ -1792,11 +1919,27 @@ class Game:
         return 1
 
     def resolve_slides(self, dx: int, dy: int) -> None:
+        """Coast entities that entered a (new) propel zone this turn."""
         if dx == 0:
             if dy == 0:
                 return
         if len(self.swarmx) + len(self.porx) + self.gw == 0:
             return
+        coasts: "list[int]" = []
+        i = 0
+        while i < self.nsnakes:
+            coasts.append(self.entered_ice_snake(i))
+            i = i + 1
+        coastb: "list[int]" = []
+        i = 0
+        while i < len(self.boxx):
+            coastb.append(self.entered_ice_box(i))
+            i = i + 1
+        coastm: "list[int]" = []
+        i = 0
+        while i < len(self.bombx):
+            coastm.append(self.entered_ice_bomb(i))
+            i = i + 1
         steps = 0
         while steps < 2000:
             moved = 0
@@ -1806,33 +1949,79 @@ class Game:
                 si = self.active + order
                 if si >= self.nsnakes:
                     si = si - self.nsnakes
-                if self.snake_on_ice(si) == 1:
-                    if self.slide_snake(si, dx, dy) == 1:
-                        moved = 1
-                        self.resolve_portals()
-                        self.flush_bombs()
-                        self.check_pits()
-                order = order + 1
-            # phase B: boxes and bombs standing on ice
-            bi = 0
-            while bi < len(self.boxx):
-                if self.boxlive[bi] == 1:
-                    if self.boxz[bi] == 0:
-                        if self.ice_at(self.boxx[bi], self.boxy[bi]) == 1:
-                            if self.slide_object(bi, -1, dx, dy) == 1:
+                if si < len(coasts):
+                    if coasts[si] == 1:
+                        if self.snake_on_ice(si) == 1:
+                            if self.slide_snake(si, dx, dy) == 1:
                                 moved = 1
                                 self.resolve_portals()
                                 self.flush_bombs()
+                                self.check_pits()
+                        else:
+                            coasts[si] = 0
+                order = order + 1
+            # phase B: boxes and bombs that entered a new zone this turn
+            bi = 0
+            while bi < len(self.boxx):
+                if bi < len(coastb):
+                    if coastb[bi] == 1:
+                        if self.boxlive[bi] == 1:
+                            if self.boxz[bi] == 0:
+                                if self.ice_at(self.boxx[bi],
+                                               self.boxy[bi]) == 1:
+                                    if self.slide_object(bi, -1,
+                                                         dx, dy) == 1:
+                                        moved = 1
+                                        self.resolve_portals()
+                                        self.flush_bombs()
+                                else:
+                                    coastb[bi] = 0
+                            else:
+                                coastb[bi] = 0
+                        else:
+                            coastb[bi] = 0
                 bi = bi + 1
             bi = 0
             while bi < len(self.bombx):
-                if self.bomblive[bi] == 1:
-                    if self.ice_at(self.bombx[bi], self.bomby[bi]) == 1:
-                        if self.slide_object(-1, bi, dx, dy) == 1:
-                            moved = 1
-                            self.resolve_portals()
-                            self.flush_bombs()
+                if bi < len(coastm):
+                    if coastm[bi] == 1:
+                        if self.bomblive[bi] == 1:
+                            if self.ice_at(self.bombx[bi],
+                                           self.bomby[bi]) == 1:
+                                if self.slide_object(-1, bi, dx, dy) == 1:
+                                    moved = 1
+                                    self.resolve_portals()
+                                    self.flush_bombs()
+                            else:
+                                coastm[bi] = 0
+                        else:
+                            coastm[bi] = 0
                 bi = bi + 1
+            # a push may have dropped someone onto a new zone — let them coast
+            i = 0
+            while i < self.nsnakes:
+                if i < len(coasts):
+                    if coasts[i] == 0:
+                        if self.entered_ice_snake(i) == 1:
+                            coasts[i] = 1
+                            moved = 1
+                i = i + 1
+            i = 0
+            while i < len(self.boxx):
+                if i < len(coastb):
+                    if coastb[i] == 0:
+                        if self.entered_ice_box(i) == 1:
+                            coastb[i] = 1
+                            moved = 1
+                i = i + 1
+            i = 0
+            while i < len(self.bombx):
+                if i < len(coastm):
+                    if coastm[i] == 0:
+                        if self.entered_ice_bomb(i) == 1:
+                            coastm[i] = 1
+                            moved = 1
+                i = i + 1
             if moved == 0:
                 return
             steps = steps + 1
@@ -2009,6 +2198,7 @@ class Game:
         self._copybuf(4, 3)                 # chkdata -> beforechk
         self.turn = self.turn + 1
         self.pushmask = 0
+        self.capture_ice_start()            # before crawl: who already rides ice
         r = self.move_active(dx, dy)
         if r == 2:
             return                          # won: no history
