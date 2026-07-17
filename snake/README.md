@@ -41,8 +41,10 @@ toggle the grid overlay, **Esc** menu.
 * **The art** is the original art: sprites (walls, box, bomb, pits, apple,
   star, portal, zones, weightpad, door, bugs, title, congrats banner, level
   buttons, background...) are downsampled from `Assets/Art/Textures/*.png`
-  into RGBA tables in `sprites.c`, with the original tints (gray bomb, pink
-  propel zone, orange load zone, translucent save icon) premultiplied.
+  into RGBA tables in `sprites.c`. The baker honors each Unity
+  `TextureImporter` sprite rect, while retaining the previous baked
+  dimensions, and premultiplies the original tints (gray bomb, pink propel
+  zone, orange load zone, translucent save icon).
 * The level-1 **winning key sequence** in `test.py` was found by the BFS
   solver in the extractor (`--solve 1`) against the extracted data.
 

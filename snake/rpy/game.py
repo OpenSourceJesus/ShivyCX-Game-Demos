@@ -1727,30 +1727,20 @@ class Game:
         vx0 = (sw - vwpx) // 2
         vy0 = (sh - vhpx) // 2
         engine.sprite(engine.SPR_BACKGROUND, vx0, vy0, vwpx, vhpx)
-        # grid overlay (the original Show Grid setting, default on)
-        if self.gridon == 1:
-            gx = 0
-            while gx <= self.vw:
-                engine.rect_a(vx0 + gx * cell, vy0, 1, vhpx, 16777215, 40)
-                gx = gx + 1
-            gy = 0
-            while gy <= self.vh:
-                engine.rect_a(vx0, vy0 + gy * cell, vwpx, 1, 16777215, 40)
-                gy = gy + 1
-        # static cells
-        y = self.miny
-        while y < self.miny + self.gh:
+        # pits / walls / doors / trapdoors: Y-sorted like the original's
+        # SetZOrders editor tool (sortingOrder = 200 - y), so southern
+        # tiles paint in front of northern ones when soft edges meet. Unity
+        # draws walls at size 1 x 1.0833334 (Wall.prefab), top-aligned to
+        # their logical cell; the extra 1/12-cell skirt creates the overlap
+        # that makes this ordering visible.
+        wallh = cell * 13 // 12
+        y = self.miny + self.gh - 1
+        while y >= self.miny:
             x = self.minx
             while x < self.minx + self.gw:
                 i = self.idx(x, y)
                 px = self.cell_px(x)
                 py = self.cell_py(y)
-                if self.ice[i] == 1:
-                    engine.sprite(engine.SPR_PROPEL, px, py, cell, cell)
-                if self.zone[i] == 1:
-                    engine.sprite(engine.SPR_SAVE, px, py, cell, cell)
-                if self.zone[i] == 2:
-                    engine.sprite(engine.SPR_LOAD, px, py, cell, cell)
                 if self.pit[i] > 0:
                     if self.filled[i] == 1:
                         engine.rect_a(px, py, cell, cell, 4139348, 120)
@@ -1766,16 +1756,6 @@ class Game:
                     else:
                         engine.sprite(engine.SPR_BOTTOMLESS, px, py,
                                       cell, cell)
-                if self.trapst[i] >= 0:
-                    engine.sprite(engine.SPR_TRAPDOOR, px, py, cell, cell)
-                dp = self.doorpad[i]
-                if dp >= 0:
-                    if self.padopen[dp] == 0:
-                        engine.sprite_ex(engine.SPR_DOOR, px, py, cell, cell,
-                                         self.padcol[dp], 256, 0)
-                    else:
-                        engine.sprite_ex(engine.SPR_DOOR, px, py, cell, cell,
-                                         self.padcol[dp], 96, 0)
                 w = self.wall[i]
                 if w > 0:
                     sid = engine.SPR_WALL
@@ -1787,11 +1767,19 @@ class Game:
                         sid = engine.SPR_WALL4
                     if w == 5:
                         sid = engine.SPR_WEAKWALL
-                    engine.sprite(sid, px, py, cell, cell)
+                    engine.sprite(sid, px, py, cell, wallh)
+                dp = self.doorpad[i]
+                if dp >= 0:
+                    a = 256
+                    if self.padopen[dp] == 1:
+                        a = 96
+                    engine.sprite_ex(engine.SPR_DOOR, px, py, cell, cell,
+                                     self.padcol[dp], a, 0)
+                if self.trapst[i] >= 0:
+                    engine.sprite(engine.SPR_TRAPDOOR, px, py, cell, cell)
                 x = x + 1
-            y = y + 1
-        # weightpads, tinted with the pad color over the whole sprite like
-        # the original's SpriteRenderer.color multiply
+            y = y - 1
+        # weightpads (order 250), tinted like SpriteRenderer.color
         i = 0
         while i < len(self.padx):
             px = self.cell_px(self.padx[i])
@@ -1801,7 +1789,7 @@ class Game:
                 sid = engine.SPR_PADDOWN
             engine.sprite_ex(sid, px, py, cell, cell, self.padcol[i], 256, 0)
             i = i + 1
-        # portal pair links (the rotating portal sprites are dynamic)
+        # portal pair links (rotating portal sprites are dynamic, order 250)
         i = 0
         while i < len(self.porx):
             oi = self.portal_other(i)
@@ -1817,21 +1805,31 @@ class Game:
                     engine.rect_a(lx - 1, ly - 1, 3, 3, self.porcol[i], 64)
                     seg = seg + 1
             i = i + 1
-        # stars, apple
+        # grid overlay last in the static bake so it sits on walls/pads
+        # (the original Show Grid setting, default on)
+        if self.gridon == 1:
+            gx = 0
+            while gx <= self.vw:
+                engine.rect_a(vx0 + gx * cell, vy0, 1, vhpx, 16777215, 40)
+                gx = gx + 1
+            gy = 0
+            while gy <= self.vh:
+                engine.rect_a(vx0, vy0 + gy * cell, vwpx, 1, 16777215, 40)
+                gy = gy + 1
+
+    def draw_board_dynamic(self, tms: int) -> None:
+        cell = self.cell
+        # rotating portal sprites (order 250)
         i = 0
-        while i < len(self.starx):
-            px = self.cell_px(self.starx[i])
-            py = self.cell_py(self.stary[i])
-            if self.starcol[i] == 0:
-                a = 256
-                if self.stashed[self.levelidx] == 1:
-                    a = 64                  # replay ghost, the original 1/4
-                engine.sprite_ex(engine.SPR_STAR, px, py, cell, cell,
-                                 16777215, a, 0)
+        while i < len(self.porx):
+            engine.sprite_ex(engine.SPR_PORTAL, self.cell_px(self.porx[i]),
+                             self.cell_py(self.pory[i]), cell, cell,
+                             self.porcol[i], 256, (tms // 300) & 3)
             i = i + 1
+        # apple (275) then boxes/bombs (300) -- above portals, below snakes.
+        # Kept out of the static bake so rotating portals stay underneath.
         engine.sprite(engine.SPR_APPLE, self.cell_px(self.ax),
                       self.cell_py(self.ay), cell, cell)
-        # boxes and bombs
         i = 0
         while i < len(self.boxx):
             if self.boxlive[i] == 1:
@@ -1845,17 +1843,23 @@ class Game:
                 engine.sprite(engine.SPR_BOMB, self.cell_px(self.bombx[i]),
                               self.cell_py(self.bomby[i]), cell, cell)
             i = i + 1
-
-    def draw_board_dynamic(self, tms: int) -> None:
-        cell = self.cell
-        # rotating portal sprites
-        i = 0
-        while i < len(self.porx):
-            engine.sprite_ex(engine.SPR_PORTAL, self.cell_px(self.porx[i]),
-                             self.cell_py(self.pory[i]), cell, cell,
-                             self.porcol[i], 256, (tms // 300) & 3)
-            i = i + 1
-        # bug swarms: three bugs wandering their cell
+        # snakes (order 300/302)
+        si = 0
+        while si < self.nsnakes:
+            self.draw_snake(si, tms)
+            si = si + 1
+        # Bugs and the foreground renderer of propel zones are order 400 in
+        # the Unity prefabs, so both belong in front of snakes.
+        y = self.miny
+        while y < self.miny + self.gh:
+            x = self.minx
+            while x < self.minx + self.gw:
+                i = self.idx(x, y)
+                if self.ice[i] == 1:
+                    engine.sprite(engine.SPR_PROPEL, self.cell_px(x),
+                                  self.cell_py(y), cell, cell)
+                x = x + 1
+            y = y + 1
         i = 0
         while i < len(self.swarmx):
             if self.swarmx[i] > -30000:
@@ -1872,11 +1876,31 @@ class Game:
                                   cell // 4, cell // 4)
                     b = b + 1
             i = i + 1
-        # snakes
-        si = 0
-        while si < self.nsnakes:
-            self.draw_snake(si, tms)
-            si = si + 1
+        # Save/load zones (order 400) and stars (order 500) also sit above
+        # snakes in the original.
+        y = self.miny
+        while y < self.miny + self.gh:
+            x = self.minx
+            while x < self.minx + self.gw:
+                i = self.idx(x, y)
+                if self.zone[i] == 1:
+                    engine.sprite(engine.SPR_SAVE, self.cell_px(x),
+                                  self.cell_py(y), cell, cell)
+                if self.zone[i] == 2:
+                    engine.sprite(engine.SPR_LOAD, self.cell_px(x),
+                                  self.cell_py(y), cell, cell)
+                x = x + 1
+            y = y + 1
+        i = 0
+        while i < len(self.starx):
+            if self.starcol[i] == 0:
+                a = 256
+                if self.stashed[self.levelidx] == 1:
+                    a = 64                  # replay ghost, the original 1/4
+                engine.sprite_ex(engine.SPR_STAR, self.cell_px(self.starx[i]),
+                                 self.cell_py(self.stary[i]), cell, cell,
+                                 16777215, a, 0)
+            i = i + 1
         # blocked-teleport indicators (fade out over a second)
         i = 0
         while i < len(self.blockx):

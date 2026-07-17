@@ -346,6 +346,52 @@ SPRITES = [
 ]
 
 
+def unity_sprite_rect(meta_path):
+    """Return Unity's imported sprite rect, or None for whole-texture.
+
+    Only Multiple-mode imports (spriteMode: 2) use the spriteSheet rects;
+    Single-mode metas often carry a stale sprites list from an earlier
+    Multiple import that Unity ignores. Unity stores sprite-rect Y from the
+    texture's bottom edge, unlike Pillow. Each Multiple texture used here
+    has exactly one sprite.
+    """
+    if not os.path.exists(meta_path):
+        return None
+    lines = open(meta_path).read().splitlines()
+    multiple = False
+    for line in lines:
+        if line.strip() == "spriteMode: 2":
+            multiple = True
+            break
+    if not multiple:
+        return None
+    in_sheet = False
+    in_rect = False
+    vals = {}
+    for line in lines:
+        if line == "  spriteSheet:":
+            in_sheet = True
+            continue
+        if not in_sheet:
+            continue
+        if line == "      rect:":
+            in_rect = True
+            vals = {}
+            continue
+        if in_rect:
+            stripped = line.strip()
+            for key in ("x", "y", "width", "height"):
+                prefix = key + ":"
+                if stripped.startswith(prefix):
+                    vals[key] = int(round(float(stripped[len(prefix):].strip())))
+            if len(vals) == 4:
+                if vals["width"] > 0 and vals["height"] > 0:
+                    return (vals["x"], vals["y"],
+                            vals["width"], vals["height"])
+                return None
+    return None
+
+
 def bake_sprites(game, out_c):
     from PIL import Image
     tex = os.path.join(game, "Assets", "Art", "Textures")
@@ -356,14 +402,31 @@ def bake_sprites(game, out_c):
              "typedef struct { int w, h; const unsigned int *px; } Sprite;",
              ""]
     table = []
+    cropped = 0
     for name, fname, tint, size in SPRITES:
         path = os.path.join(tex, fname)
         img = Image.open(path).convert("RGBA")
         w0, h0 = img.size
+        # Compute the old baked dimensions from the full source image first.
+        # Cropping must not change the sprite's screen footprint: resize the
+        # imported rect back into exactly these dimensions.
+        outw, outh = w0, h0
         if max(w0, h0) > size:
             s = size / max(w0, h0)
-            img = img.resize((max(1, int(w0 * s)), max(1, int(h0 * s))),
-                             Image.LANCZOS)
+            outw = max(1, int(w0 * s))
+            outh = max(1, int(h0 * s))
+        rect = unity_sprite_rect(path + ".meta")
+        if rect is not None:
+            rx, ry, rw, rh = rect
+            # Unity rects have a bottom-left origin. Pillow's crop has a
+            # top-left origin and deliberately permits out-of-image bounds,
+            # filling those portions with transparency just as the authored
+            # import rect requests.
+            top = h0 - ry - rh
+            img = img.crop((rx, top, rx + rw, top + rh))
+            cropped += 1
+        if img.size != (outw, outh):
+            img = img.resize((outw, outh), Image.LANCZOS)
         w, h = img.size
         data = list(img.getdata())
         words = []
@@ -388,7 +451,8 @@ def bake_sprites(game, out_c):
     lines.append("const int SPRITE_COUNT = %d;" % len(table))
     lines.append("")
     open(out_c, "w").write("\n".join(lines) + "\n")
-    print("baked %d sprites -> %s" % (len(table), out_c))
+    print("baked %d sprites (%d Unity rects) -> %s" %
+          (len(table), cropped, out_c))
     return [name for name, _f, _t, _s in SPRITES]
 
 
