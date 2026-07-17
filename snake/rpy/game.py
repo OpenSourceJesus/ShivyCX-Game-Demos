@@ -202,6 +202,7 @@ class Game:
         self.s5 = Snake()
         self.nsnakes = 0
         self.active = 0
+        self.pushmask = 0                   # snakes currently in a push chain
 
         self.turn = 0
         self.lastdx = 0
@@ -969,6 +970,7 @@ class Game:
         self.nsnakes = ns
         if self.active >= ns:
             self.active = 0
+        self.bombq = []                     # never carry a mid-move queue across undo/load
 
     # undo/redo entries are [corelen, core..., chklen, chk...] appended to a
     # flat int array; a parallel array holds each entry's total length. The
@@ -1217,8 +1219,12 @@ class Game:
     # ------------------------------------------------------------- movement
 
     def try_push_at(self, x: int, y: int, dx: int, dy: int,
-                    depth: int) -> int:
-        """Push whatever occupies (x,y) one cell. 1 = cell was vacated."""
+                    depth: int, do_push: int) -> int:
+        """Push whatever occupies (x,y) one cell. 1 = cell was vacated.
+
+        do_push=0 probes without mutating (and without queueing bombs),
+        matching the original Snake.TryPush(push:false) feasibility pass.
+        """
         if depth > 32:
             return 0
         nx = x + dx
@@ -1229,12 +1235,13 @@ class Game:
             if bb < 0:
                 si = self.snake_at(x, y)
                 if si >= 0:
-                    return self.try_push_snake(si, dx, dy)
+                    return self.try_push_snake(si, dx, dy, do_push)
                 return 0
         # box/bomb chain
         if self.wall_at(nx, ny) == 1:
             if bb >= 0:
-                self.queue_bomb(bb)         # bomb against a wall blows up
+                if do_push == 1:
+                    self.queue_bomb(bb)     # bomb against a wall blows up
             return 0
         if self.apple_at(nx, ny) == 1:
             return 0
@@ -1246,10 +1253,13 @@ class Game:
         if self.snake_at(nx, ny) >= 0:
             blocked = 1
         if blocked == 1:
-            if self.try_push_at(nx, ny, dx, dy, depth + 1) == 0:
+            if self.try_push_at(nx, ny, dx, dy, depth + 1, do_push) == 0:
                 if bb >= 0:
-                    self.queue_bomb(bb)
+                    if do_push == 1:
+                        self.queue_bomb(bb)
                 return 0
+        if do_push == 0:
+            return 1
         if bx >= 0:
             self.boxx[bx] = nx
             self.boxy[bx] = ny
@@ -1261,28 +1271,74 @@ class Game:
             self.object_landed(-1, bb)
         return 1
 
-    def try_push_snake(self, si: int, dx: int, dy: int) -> int:
-        """Translate the whole snake rigidly by one cell."""
+    def try_push_snake(self, si: int, dx: int, dy: int,
+                       do_push: int) -> int:
+        """Translate the whole snake rigidly by one cell.
+
+        Like the original TryPushSnake: each part's destination may itself
+        need a box/bomb/snake push, so those are resolved (probe then
+        commit) before the snake slides. pushmask blocks A↔B push cycles.
+        """
         s = self.snake(si)
+        if s.gone == 1:
+            return 0
+        bit = 1 << si
+        if (self.pushmask & bit) != 0:
+            return 0                        # already being pushed in this chain
+        self.pushmask = self.pushmask | bit
+        ok = 1
+        # --- feasibility pass (no mutations) ---
         j = 0
         while j < s.npart():
             tx = s.xs[j] + dx
             ty = s.ys[j] + dy
             if s.on_cell_any(tx, ty) == 0:
                 if self.wall_at(tx, ty) == 1:
-                    return 0
+                    ok = 0
+                    break
                 if self.apple_at(tx, ty) == 1:
-                    return 0
+                    ok = 0
+                    break
                 if self.box_at(tx, ty) >= 0:
-                    return 0
-                if self.bomb_at(tx, ty) >= 0:
-                    return 0
-                oi = self.snake_at(tx, ty)
-                if oi >= 0:
-                    if oi != si:
-                        return 0
+                    if self.try_push_at(tx, ty, dx, dy, 0, 0) == 0:
+                        ok = 0
+                        break
+                elif self.bomb_at(tx, ty) >= 0:
+                    if self.try_push_at(tx, ty, dx, dy, 0, 0) == 0:
+                        ok = 0
+                        break
+                else:
+                    oi = self.snake_at(tx, ty)
+                    if oi >= 0:
+                        if oi != si:
+                            if self.try_push_snake(oi, dx, dy, 0) == 0:
+                                ok = 0
+                                break
+            j = j + 1
+        if ok == 0:
+            self.pushmask = self.pushmask ^ bit
+            return 0
+        if do_push == 0:
+            self.pushmask = self.pushmask ^ bit
+            return 1
+        # --- commit: shove whatever sits on each destination, then slide ---
+        j = 0
+        while j < s.npart():
+            tx = s.xs[j] + dx
+            ty = s.ys[j] + dy
+            if s.on_cell_any(tx, ty) == 0:
+                if self.box_at(tx, ty) >= 0:
+                    self.try_push_at(tx, ty, dx, dy, 0, 1)
+                elif self.bomb_at(tx, ty) >= 0:
+                    self.try_push_at(tx, ty, dx, dy, 0, 1)
+                else:
+                    oi = self.snake_at(tx, ty)
+                    if oi >= 0:
+                        if oi != si:
+                            self.try_push_snake(oi, dx, dy, 1)
             j = j + 1
         s.translate(dx, dy)
+        self.pushmask = self.pushmask ^ bit
         _log("[game] snake pushed")
         return 1
 
@@ -1379,13 +1435,13 @@ class Game:
             return 0
         oi = self.snake_at(tx, ty)
         if oi >= 0:
-            if self.try_push_snake(oi, dx, dy) == 0:
+            if self.try_push_snake(oi, dx, dy, 1) == 0:
                 return 0
         elif self.box_at(tx, ty) >= 0:
-            if self.try_push_at(tx, ty, dx, dy, 0) == 0:
+            if self.try_push_at(tx, ty, dx, dy, 0, 1) == 0:
                 return 0
         elif self.bomb_at(tx, ty) >= 0:
-            if self.try_push_at(tx, ty, dx, dy, 0) == 0:
+            if self.try_push_at(tx, ty, dx, dy, 0, 1) == 0:
                 return 0
         # body follow: shift each part into the one ahead of it
         j = s.npart() - 1
@@ -1942,6 +1998,7 @@ class Game:
         self._copybuf(0, 2)                 # snapbuf -> beforebuf
         self._copybuf(4, 3)                 # chkdata -> beforechk
         self.turn = self.turn + 1
+        self.pushmask = 0
         r = self.move_active(dx, dy)
         if r == 2:
             return                          # won: no history
@@ -2015,7 +2072,7 @@ class Game:
         self.ser()
         self._hist_push(1, 0, 4)            # current state -> redo
         self._hist_pop_apply(0)
-        _log("[game] undo -> turn " + str(self.turn))
+        _log("[game] undo")
 
     def do_redo(self) -> None:
         if self.winning == 1:
