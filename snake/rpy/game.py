@@ -823,6 +823,12 @@ class Game:
             d.append(self.bomby[i])
             d.append(self.bomblive[i])
             i = i + 1
+        i = 0
+        n = len(self.swarmx)
+        while i < n:
+            d.append(self.swarmx[i])    # blasts remove swarms (-30000)
+            d.append(self.swarmy[i])
+            i = i + 1
         # snake count varies at runtime (portal exit clones), so the
         # snapshot carries it plus each snake's colour
         d.append(self.nsnakes)
@@ -915,6 +921,13 @@ class Game:
             self.bomby[i] = d[k + 1]
             self.bomblive[i] = d[k + 2]
             k = k + 3
+            i = i + 1
+        i = 0
+        n = len(self.swarmx)
+        while i < n:
+            self.swarmx[i] = d[k]
+            self.swarmy[i] = d[k + 1]
+            k = k + 2
             i = i + 1
         ns = d[k]
         k = k + 1
