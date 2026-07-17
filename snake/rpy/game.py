@@ -299,6 +299,11 @@ class Game:
         i = self.idx(x, y)
         if i < 0:
             return 0
+        # Closed trapdoors cover their hidden pit (Unity: pitGo inactive
+        # while the door is active). Without this, a stale pit[i] after
+        # undo would swallow objects on the still-closed door.
+        if self.trapst[i] >= 0:
+            return 0
         if self.pit[i] > 0:
             if self.filled[i] == 0:
                 return self.pit[i]
@@ -784,6 +789,7 @@ class Game:
             d.append(self.fillbox[i])
             d.append(self.trapst[i])
             d.append(self.wall[i])          # weak walls can be destroyed
+            d.append(self.pit[i])           # trapdoors reveal bottomless pits
             i = i + 1
         i = 0
         n = len(self.padx)
@@ -875,7 +881,8 @@ class Game:
             self.fillbox[i] = d[k + 1]
             self.trapst[i] = d[k + 2]
             self.wall[i] = d[k + 3]
-            k = k + 4
+            self.pit[i] = d[k + 4]
+            k = k + 5
             i = i + 1
         i = 0
         n = len(self.padx)
