@@ -37,6 +37,7 @@ class Snake:
         self.alive = 1
         self.gone = 1                      # slot unused until loaded
         self.swarmed = 0
+        self.hashead = 1                   # 0: original head part was blown off
         self.colr = 0
         self.colg = 255
         self.colb = 0
@@ -626,6 +627,7 @@ class Game:
                     s.gone = 0
                     s.alive = 1
                     s.swarmed = 0
+                    s.hashead = 1
                     s.colr = int(toks[1])
                     s.colg = int(toks[2])
                     s.colb = int(toks[3])
@@ -825,6 +827,7 @@ class Game:
             d.append(s.alive)
             d.append(s.gone)
             d.append(s.swarmed)
+            d.append(s.hashead)
             d.append(s.fdx)
             d.append(s.fdy)
             d.append(s.colr)
@@ -916,13 +919,14 @@ class Game:
             s.alive = d[k]
             s.gone = d[k + 1]
             s.swarmed = d[k + 2]
-            s.fdx = d[k + 3]
-            s.fdy = d[k + 4]
-            s.colr = d[k + 5]
-            s.colg = d[k + 6]
-            s.colb = d[k + 7]
-            np = d[k + 8]
-            k = k + 9
+            s.hashead = d[k + 3]
+            s.fdx = d[k + 4]
+            s.fdy = d[k + 5]
+            s.colr = d[k + 6]
+            s.colg = d[k + 7]
+            s.colb = d[k + 8]
+            np = d[k + 9]
+            k = k + 10
             s.xs = []
             s.ys = []
             s.zs = []
@@ -1092,7 +1096,10 @@ class Game:
                 pi = pi + 1
 
     def snake_hit(self, si: int, x: int, y: int) -> None:
-        """Remove the part at (x,y); keep the run holding the head."""
+        """Remove the part at (x,y). Like the original's
+        DestroyPartsAndSplit: any partially destroyed snake dies (dead
+        corpse, uncontrollable); the first surviving run stays this
+        snake, a run behind the gap splits off as a dead fragment."""
         s = self.snake(si)
         if s.gone == 1:
             return
@@ -1105,21 +1112,64 @@ class Game:
             j = j + 1
         if hit < 0:
             return
-        if hit == 0:
+        n = s.npart()
+        if n == 1:
             s.alive = 0
-            s.gone = 1                      # head destroyed: snake is gone
+            s.gone = 1                      # nothing survives
             s.xs = []
             s.ys = []
             s.zs = []
             s.snap_visual()
             _log("[game] snake destroyed")
+            if si == self.active:
+                self.auto_switch()
+            return
+        if hit == 0:
+            # head destroyed: the body remains as a headless corpse
+            k = 1
+            while k < n:
+                s.xs[k - 1] = s.xs[k]
+                s.ys[k - 1] = s.ys[k]
+                s.zs[k - 1] = s.zs[k]
+                k = k + 1
+            s.xs.pop()
+            s.ys.pop()
+            s.zs.pop()
+            s.hashead = 0
         else:
-            while s.npart() > hit:          # drop the fragment behind the hit
+            if hit + 1 < n:
+                # a run survives behind the gap: dead headless fragment
+                if self.nsnakes < MAX_SNAKES:
+                    f = self.snake(self.nsnakes)
+                    f.gone = 0
+                    f.alive = 0
+                    f.swarmed = 0
+                    f.hashead = 0
+                    f.colr = s.colr
+                    f.colg = s.colg
+                    f.colb = s.colb
+                    f.fdx = s.fdx
+                    f.fdy = s.fdy
+                    f.xs = []
+                    f.ys = []
+                    f.zs = []
+                    f.vx = []
+                    f.vy = []
+                    k = hit + 1
+                    while k < n:
+                        f.xs.append(s.xs[k])
+                        f.ys.append(s.ys[k])
+                        f.zs.append(s.zs[k])
+                        k = k + 1
+                    f.snap_visual()
+                    self.nsnakes = self.nsnakes + 1
+            while s.npart() > hit:
                 s.xs.pop()
                 s.ys.pop()
                 s.zs.pop()
-            s.snap_visual()
-            _log("[game] snake lost its tail")
+        s.alive = 0                         # partial destruction kills it
+        s.snap_visual()
+        _log("[game] snake lost a part and died")
         if si == self.active:
             self.auto_switch()
 
@@ -1443,6 +1493,7 @@ class Game:
         d.gone = 0
         d.alive = src.alive
         d.swarmed = src.swarmed
+        d.hashead = src.hashead
         d.colr = src.colr
         d.colg = src.colg
         d.colb = src.colb
@@ -2296,9 +2347,12 @@ class Game:
                 engine.round_rect(px + inset, py + inset, cell - 2 * inset,
                                   cell - 2 * inset, rad, corners, dark)
             j = j - 1
-        # face
+        # face (only while the original head part survives: headless
+        # corpses and fragments from a bomb blast show no eyes)
         if n > 0:
             if s.zs[0] < 2:
+                if s.hashead == 0:
+                    return
                 hx = self.ox + (s.vx[0] * cell) // 256
                 hy = self.oy - (s.vy[0] * cell) // 256
                 rot = 0
