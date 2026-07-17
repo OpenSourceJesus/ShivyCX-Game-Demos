@@ -1,0 +1,506 @@
+#!/usr/bin/env python3
+"""extract_levels.py -- pull the real levels + art out of the Unity project.
+
+Reads ~/snake-game's scene YAML (each level is a set of PrefabInstance blocks
+whose m_Modifications override positions and cross-references) and the prefab
++ texture assets, and writes:
+
+  rpy/levels.py   LEVELS: one compact string per level (opcode lines), plus
+                  per-level view geometry and object links -- parsed at
+                  runtime by the rpython game
+  sprites.c       the game's actual sprite art, downsampled + tinted into
+                  static RGBA tables the kernel blitter draws
+
+Usage:  python3 tools/extract_levels.py [--game DIR] [--out DIR] [--solve N]
+
+The level record grammar (one record per line, ints only):
+  V vw vh cx100 cy100      view size in cells + camera center *100
+  W x y kind               wall (kind 0..3 = Wall/2/3/4), 4 = weak wall
+  P x y type               pit: 0 shallow, 1 deep, 2 bottomless
+  O x y                    box
+  M x y                    bomb
+  A x y                    apple (End)
+  * x y                    star
+  I x y                    propel (ice) zone
+  Y x y                    save zone
+  L x y                    load zone
+  H x y                    trapdoor
+  G x y                    bug swarm
+  D x y r g b ncells x y.. weightpad + its door cells (color 0..255)
+  R x y pair r g b         portal (pair = link index; both ends share it)
+  S r g b npart x y ...    snake (color 0..255; parts head first)
+"""
+import argparse
+import os
+import re
+import sys
+from collections import deque
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+# ---------------------------------------------------------------- yaml bits
+
+DOC_RE = re.compile(r"^--- !u!(\d+) &(\d+)( stripped)?\s*$", re.M)
+
+
+def split_docs(text):
+    """Yield (class_id, file_id, stripped, body) unity yaml documents."""
+    marks = list(DOC_RE.finditer(text))
+    for i, m in enumerate(marks):
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
+        yield int(m.group(1)), int(m.group(2)), bool(m.group(3)), \
+            text[m.start():end]
+
+
+def guid_map(game):
+    """asset guid -> asset path, from every .meta under Assets/."""
+    out = {}
+    for root, _dirs, files in os.walk(os.path.join(game, "Assets")):
+        for f in files:
+            if not f.endswith(".meta"):
+                continue
+            p = os.path.join(root, f)
+            try:
+                head = open(p, encoding="utf-8", errors="replace").read(400)
+            except OSError:
+                continue
+            m = re.search(r"guid: ([0-9a-f]{32})", head)
+            if m:
+                out[m.group(1)] = p[:-5]
+    return out
+
+
+class Instance:
+    def __init__(self, fid, guid, parent):
+        self.fid = fid
+        self.guid = guid
+        self.parent = parent          # transform fileID it is parented to
+        self.mods = {}                # (target_fid, propertyPath) -> value
+        self.refs = {}                # (target_fid, propertyPath) -> objectRef
+        self.name = "?"
+
+    def prop(self, path, default=0.0):
+        """Any-target property lookup (root transform paths are unique)."""
+        for (_t, p), v in self.mods.items():
+            if p == path:
+                try:
+                    return float(v)
+                except ValueError:
+                    return default
+        return default
+
+    def prop_of(self, target, path, default=0.0):
+        v = self.mods.get((target, path))
+        if v is None:
+            return default
+        try:
+            return float(v)
+        except ValueError:
+            return default
+
+
+MOD_RE = re.compile(
+    r"- target: \{fileID: (\d+), guid: ([0-9a-f]{32}), type: \d+\}\s*\n"
+    r"\s*propertyPath: '?([^\n']+)'?\s*\n"
+    r"\s*value: ?([^\n]*)\s*\n"
+    r"\s*objectReference: \{fileID: (-?\d+)\}")
+
+
+def parse_scene(path):
+    """-> (instances{fid:Instance}, stripped{fid:(instance_fid)})"""
+    text = open(path, encoding="utf-8", errors="replace").read()
+    instances, stripped = {}, {}
+    for cls, fid, is_stripped, body in split_docs(text):
+        if cls == 1001:  # PrefabInstance
+            g = re.search(r"m_SourcePrefab: \{fileID: \d+, guid: "
+                          r"([0-9a-f]{32})", body)
+            par = re.search(r"m_TransformParent: \{fileID: (\d+)\}", body)
+            inst = Instance(fid, g.group(1) if g else "",
+                            int(par.group(1)) if par else 0)
+            for mm in MOD_RE.finditer(body):
+                key = (int(mm.group(1)), mm.group(3).strip())
+                inst.mods[key] = mm.group(4).strip()
+                ref = int(mm.group(5))
+                if ref:
+                    inst.refs[key] = ref
+            instances[fid] = inst
+        elif is_stripped:
+            m = re.search(r"m_PrefabInstance: \{fileID: (\d+)\}", body)
+            if m:
+                stripped[fid] = int(m.group(1))
+    return instances, stripped
+
+
+# ------------------------------------------------------------ prefab lookup
+
+# Snake prefab internals (stable fileIDs inside Snake.prefab / Snake Part):
+SNAKE_COMPONENT = 6511202892623660480      # the Snake MonoBehaviour
+SNAKE_ROOT_TRS = 9206719234441084136
+SNAKE_PART0_TRS = 160637136455441819       # head (stripped nested id)
+SNAKE_PART1_TRS = 1353585068579724393      # second part
+PART_ROOT_TRS = 8755860299376948906        # Snake Part.prefab root transform
+
+
+def rnd(v):
+    return int(round(v))
+
+
+def instance_pos(inst):
+    return (inst.prop("m_LocalPosition.x"), inst.prop("m_LocalPosition.y"))
+
+
+def extract_level(scene_path, guids):
+    instances, stripped = parse_scene(scene_path)
+
+    def pname(inst):
+        p = guids.get(inst.guid, "")
+        return os.path.splitext(os.path.basename(p))[0]
+
+    def resolve(ref):
+        """objectReference fileID -> owning PrefabInstance fid."""
+        if ref in stripped:
+            return stripped[ref]
+        if ref in instances:
+            return ref
+        return 0
+
+    recs, portals, snakes, pads = [], [], [], []
+    boxes = []
+    view = None
+    for fid, inst in sorted(instances.items()):
+        name = pname(inst)
+        inst.name = name
+        x, y = instance_pos(inst)
+        cx, cy = rnd(x), rnd(y)
+        if name in ("Wall", "Wall 2", "Wall 3", "Wall 4", "Weak Wall"):
+            kind = {"Wall": 0, "Wall 2": 1, "Wall 3": 2, "Wall 4": 3,
+                    "Weak Wall": 4}[name]
+            recs.append("W %d %d %d" % (cx, cy, kind))
+        elif name == "Pit":
+            recs.append("P %d %d 1" % (cx, cy))
+        elif name == "Shallow Pit":
+            recs.append("P %d %d 0" % (cx, cy))
+        elif name == "Bottomless Pit":
+            recs.append("P %d %d 2" % (cx, cy))
+        elif name == "Box":
+            boxes.append(fid)
+            recs.append("O %d %d" % (cx, cy))
+        elif name == "Bomb":
+            recs.append("M %d %d" % (cx, cy))
+        elif name == "End":
+            recs.append("A %d %d" % (cx, cy))
+        elif name == "Star":
+            recs.append("* %d %d" % (cx, cy))
+        elif name == "Propel Zone":
+            recs.append("I %d %d" % (cx, cy))
+        elif name == "Save Zone":
+            recs.append("Y %d %d" % (cx, cy))
+        elif name == "Load Zone":
+            recs.append("L %d %d" % (cx, cy))
+        elif name == "Trapdoor":
+            recs.append("H %d %d" % (cx, cy))
+        elif name == "Bug Swarm":
+            recs.append("G %d %d" % (cx, cy))
+        elif name == "Portal":
+            other = 0
+            for (t, p), ref in inst.refs.items():
+                if p == "other":
+                    other = resolve(ref)
+            col = [inst.prop("lineColor." + c, d)
+                   for c, d in (("r", 0.0), ("g", 1.0), ("b", 1.0))]
+            portals.append((fid, cx, cy, other, col))
+        elif name == "Weightpad":
+            doors = []
+            for (t, p), ref in sorted(inst.refs.items(),
+                                      key=lambda kv: kv[0][1]):
+                if p.startswith("doors.Array.data"):
+                    doors.append(resolve(ref))
+            col = [inst.prop("doorColor." + c, d)
+                   for c, d in (("r", 0.0), ("g", 1.0), ("b", 0.8235294))]
+            pads.append((fid, cx, cy, doors, col))
+        elif name == "Snake":
+            col = [inst.prop_of(SNAKE_COMPONENT, "color." + c, d)
+                   for c, d in (("r", 0.0), ("g", 1.0), ("b", 0.0))]
+            rx = inst.prop_of(SNAKE_ROOT_TRS, "m_LocalPosition.x")
+            ry = inst.prop_of(SNAKE_ROOT_TRS, "m_LocalPosition.y")
+            nparts = 2
+            for (t, p), v in inst.mods.items():
+                if p == "parts.Array.size":
+                    nparts = max(nparts, int(float(v)))
+                m = re.match(r"parts\.Array\.data\[(\d+)\]$", p)
+                if m and inst.refs.get((t, p)):
+                    nparts = max(nparts, int(m.group(1)) + 1)
+            parts = []
+            for i in range(nparts):
+                if i == 0:
+                    px = inst.prop_of(SNAKE_PART0_TRS, "m_LocalPosition.x")
+                    py = inst.prop_of(SNAKE_PART0_TRS, "m_LocalPosition.y")
+                elif i == 1:
+                    px = inst.prop_of(SNAKE_PART1_TRS, "m_LocalPosition.x")
+                    py = inst.prop_of(SNAKE_PART1_TRS, "m_LocalPosition.y")
+                else:
+                    ref = None
+                    for (t, p), r in inst.refs.items():
+                        if p == "parts.Array.data[%d]" % i:
+                            ref = r
+                    if ref is None:
+                        continue
+                    part_inst = instances.get(resolve(ref))
+                    if part_inst is None:
+                        continue
+                    px = part_inst.prop_of(PART_ROOT_TRS, "m_LocalPosition.x")
+                    py = part_inst.prop_of(PART_ROOT_TRS, "m_LocalPosition.y")
+                parts.append((rnd(rx + px), rnd(ry + py)))
+            snakes.append((fid, col, parts))
+        elif name == "Camera":
+            vw = inst.prop("viewSize.x", 32.0)
+            vh = inst.prop("viewSize.y", 18.0)
+            view = (vw, vh, x, y)
+
+    # door instances referenced by weightpads (Door prefab instances)
+    door_pos = {}
+    for fid, inst in instances.items():
+        if pname(inst) == "Door":
+            px, py = instance_pos(inst)
+            door_pos[fid] = (rnd(px), rnd(py))
+
+    out = []
+    if view is None:
+        view = (32.0, 18.0, 0.0, 0.0)
+    out.append("V %d %d %d %d" % (rnd(view[0]), rnd(view[1]),
+                                  rnd(view[2] * 100), rnd(view[3] * 100)))
+    out.extend(sorted(recs))
+
+    pair_of = {}
+    nextpair = 0
+    for fid, cx, cy, other, col in portals:
+        if fid in pair_of:
+            pid = pair_of[fid]
+        elif other and other in pair_of:
+            pid = pair_of[other]
+        else:
+            pid = nextpair
+            nextpair += 1
+        pair_of[fid] = pid
+        if other:
+            pair_of.setdefault(other, pid)
+        out.append("R %d %d %d %d %d %d" % (
+            cx, cy, pid,
+            rnd(col[0] * 255), rnd(col[1] * 255), rnd(col[2] * 255)))
+
+    for fid, cx, cy, doors, col in pads:
+        cells = [door_pos[d] for d in doors if d in door_pos]
+        rec = "D %d %d %d %d %d %d" % (
+            cx, cy, rnd(col[0] * 255), rnd(col[1] * 255), rnd(col[2] * 255),
+            len(cells))
+        for dx, dy in cells:
+            rec += " %d %d" % (dx, dy)
+        out.append(rec)
+
+    # active snake first: the original activates "Snake" (base name) first
+    for fid, col, parts in snakes:
+        rec = "S %d %d %d %d" % (rnd(col[0] * 255), rnd(col[1] * 255),
+                                 rnd(col[2] * 255), len(parts))
+        for px, py in parts:
+            rec += " %d %d" % (px, py)
+        out.append(rec)
+    return "\n".join(out)
+
+
+# ------------------------------------------------------------------ sprites
+
+# name -> (texture file, tint rgba, bake size)
+SPRITES = [
+    ("WALL",      "Wall.png",            None, 96),
+    ("WALL2",     "Wall 2.png",          None, 96),
+    ("WALL3",     "Wall 3.png",          None, 96),
+    ("WALL4",     "Wall 4.png",          None, 96),
+    ("WEAKWALL",  "Weak Wall.png",       None, 96),
+    ("BOX",       "Box.png",             None, 96),
+    ("BOMB",      "Bomb.png",            (0.502, 0.502, 0.502, 1.0), 96),
+    ("PIT",       "Deep Pit.png",        None, 96),
+    ("SHALLOW",   "Shallow Pit.png",     None, 96),
+    ("BOTTOMLESS", "Bottomless Pit.png", None, 96),
+    ("TRAPDOOR",  "Trapdoor.png",        None, 96),
+    ("APPLE",     "Apple.png",           None, 96),
+    ("STAR",      "Star.png",            None, 96),
+    ("PORTAL",    "Portal.png",          None, 96),
+    ("SAVE",      "Save Icon.png",       (1.0, 1.0, 1.0, 0.502), 96),
+    ("LOAD",      "Load Icon.png",       (1.0, 0.502, 0.0, 0.502), 96),
+    ("PROPEL",    "Propel Zone.png",     (1.0, 0.502, 1.0, 0.502), 96),
+    ("PAD",       "Weightpad.png",       None, 96),
+    ("PADDOWN",   "Weightpad (Pressed).png", None, 96),
+    ("DOOR",      "Door.png",            None, 96),
+    ("BUG",       "Bug.png",             None, 48),
+    ("EYES",      "Snake Eyes (Outer).png", None, 96),
+    ("EYEIN",     "Snake Eye (Inner).png", None, 32),
+    ("DEADEYES",  "Dead Eyes And Tongue.png", None, 96),
+    ("TITLE",     "Title.png",           None, 960),
+    ("CONGRATS",  "Congrats.png",        None, 960),
+    ("LVLBTN",    "Level Button.png",    None, 96),
+    ("LVLWON",    "Level Button (Won).png", None, 96),
+    ("STARON",    "Level Button Star (Collected).png", None, 48),
+    ("STAROFF",   "Level Button Star (Uncollected).png", None, 48),
+    ("BLOCKED",   "Teleport Blocked Indicator.png", None, 96),
+    ("BACKGROUND", "Level Background.png", None, 960),
+]
+
+
+def bake_sprites(game, out_c):
+    from PIL import Image
+    tex = os.path.join(game, "Assets", "Art", "Textures")
+    lines = ["/* sprites.c -- generated by tools/extract_levels.py from the"
+             " original\n * snake-game art (downsampled RGBA, tints"
+             " premultiplied). Do not edit. */",
+             '#include "kernel.h"', "",
+             "typedef struct { int w, h; const unsigned int *px; } Sprite;",
+             ""]
+    table = []
+    for name, fname, tint, size in SPRITES:
+        path = os.path.join(tex, fname)
+        img = Image.open(path).convert("RGBA")
+        w0, h0 = img.size
+        if max(w0, h0) > size:
+            s = size / max(w0, h0)
+            img = img.resize((max(1, int(w0 * s)), max(1, int(h0 * s))),
+                             Image.LANCZOS)
+        w, h = img.size
+        data = list(img.getdata())
+        words = []
+        for (r, g, b, a) in data:
+            if tint:
+                r = int(r * tint[0]); g = int(g * tint[1])
+                b = int(b * tint[2]); a = int(a * tint[3])
+            words.append((a << 24) | (r << 16) | (g << 8) | b)
+        rows = [", ".join("0x%08xu" % v for v in words[i:i + 8])
+                for i in range(0, len(words), 8)]
+        lines.append("static const unsigned int SPX_%s[%d] = {" %
+                     (name, w * h))
+        lines.extend("    " + r + "," for r in rows)
+        lines.append("};")
+        table.append((name, w, h))
+    lines.append("")
+    lines.append("const Sprite SPRITES[%d] = {" % len(table))
+    for name, w, h in table:
+        lines.append("    { %d, %d, SPX_%s },   /* %s */" %
+                     (w, h, name, name))
+    lines.append("};")
+    lines.append("const int SPRITE_COUNT = %d;" % len(table))
+    lines.append("")
+    open(out_c, "w").write("\n".join(lines) + "\n")
+    print("baked %d sprites -> %s" % (len(table), out_c))
+    return [name for name, _f, _t, _s in SPRITES]
+
+
+# ------------------------------------------------------------------- solver
+
+def solve(level_text, max_nodes=2000000):
+    """BFS a simple level (walls/pits/boxes/apple) to a win key sequence."""
+    walls, pits, boxes, snake, apple = set(), {}, [], [], None
+    for line in level_text.splitlines():
+        f = line.split()
+        if not f:
+            continue
+        if f[0] == "W":
+            walls.add((int(f[1]), int(f[2])))
+        elif f[0] == "P":
+            pits[(int(f[1]), int(f[2]))] = int(f[3])
+        elif f[0] == "O":
+            boxes.append((int(f[1]), int(f[2])))
+        elif f[0] == "A":
+            apple = (int(f[1]), int(f[2]))
+        elif f[0] == "S":
+            n = int(f[4])
+            snake = [(int(f[5 + 2 * i]), int(f[6 + 2 * i]))
+                     for i in range(n)]
+    start = (tuple(snake), tuple(sorted(boxes)), frozenset())
+    seen = {start}
+    q = deque([(start, "")])
+    dirs = {"u": (0, 1), "d": (0, -1), "l": (-1, 0), "r": (1, 0)}
+    while q and len(seen) < max_nodes:
+        (parts, bxs, filled), path = q.popleft()
+        for key, (dx, dy) in dirs.items():
+            hx, hy = parts[0]
+            tx, ty = hx + dx, hy + dy
+            nparts, nbxs = list(parts), list(bxs)
+            if (tx, ty) == apple:
+                return path + key
+            if (tx, ty) in walls or (tx, ty) in parts:
+                continue
+            if (tx, ty) in bxs:
+                bx, by = tx + dx, ty + dy
+                if (bx, by) in walls or (bx, by) in bxs or \
+                        (bx, by) in parts or (bx, by) == apple:
+                    continue
+                nbxs.remove((tx, ty))
+                nfilled = set(filled)
+                if (bx, by) in pits and pits[(bx, by)] == 1 and \
+                        (bx, by) not in filled:
+                    nfilled.add((bx, by))
+                elif (bx, by) in pits and pits[(bx, by)] == 2 and \
+                        (bx, by) not in filled:
+                    pass                      # swallowed
+                else:
+                    nbxs.append((bx, by))
+            else:
+                nfilled = set(filled)
+            nparts = [(tx, ty)] + [nparts[i] for i in range(len(parts) - 1)]
+            if all((px, py) in pits and (px, py) not in nfilled
+                   for px, py in nparts):
+                continue                      # whole snake over pits: dies
+            st = (tuple(nparts), tuple(sorted(nbxs)), frozenset(nfilled))
+            if st not in seen:
+                seen.add(st)
+                q.append((st, path + key))
+    return None
+
+
+# --------------------------------------------------------------------- main
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--game", default=os.path.expanduser("~/snake-game"))
+    ap.add_argument("--out", default=os.path.join(HERE, ".."))
+    ap.add_argument("--levels", type=int, default=43)
+    ap.add_argument("--solve", type=int, default=0)
+    args = ap.parse_args()
+
+    guids = guid_map(args.game)
+    print("guid map: %d assets" % len(guids))
+
+    texts = []
+    for n in range(1, args.levels + 1):
+        scene = os.path.join(args.game, "Assets", "Scenes", "%d.unity" % n)
+        t = extract_level(scene, guids)
+        texts.append(t)
+        counts = {}
+        for line in t.splitlines():
+            counts[line[0]] = counts.get(line[0], 0) + 1
+        print("level %2d: %s" % (n, " ".join(
+            "%s:%d" % kv for kv in sorted(counts.items()))))
+
+    if args.solve:
+        sol = solve(texts[args.solve - 1])
+        print("level %d solution: %s" % (args.solve, sol))
+
+    out_py = os.path.join(args.out, "rpy", "levels.py")
+    with open(out_py, "w") as f:
+        f.write('"""levels -- generated by tools/extract_levels.py from the\n'
+                "original Unity scenes (~/snake-game/Assets/Scenes/*.unity).\n"
+                'Do not edit by hand; regenerate with `make levels`."""\n\n\n'
+                "def level_count() -> int:\n"
+                "    return %d\n\n\n" % len(texts))
+        f.write("def level_data(idx: int) -> \"char*\":\n")
+        for i, t in enumerate(texts):
+            f.write("    %s idx == %d:\n" % ("if" if i == 0 else "elif", i))
+            f.write("        return %r\n" % t)
+        f.write("    return \"\"\n")
+    print("wrote %s" % out_py)
+
+    names = bake_sprites(args.game, os.path.join(args.out, "sprites.c"))
+    print("sprite ids: " +
+          ", ".join("%s=%d" % (n, i) for i, n in enumerate(names)))
+
+
+if __name__ == "__main__":
+    main()

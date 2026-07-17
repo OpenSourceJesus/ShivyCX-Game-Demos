@@ -1,0 +1,208 @@
+/* glue.c -- the `snake_glue` FFI shim the generated rpython game calls.
+ *
+ * Same pattern as mbos_glue.c in ShivyC's mbos demo: py2c lowers
+ * `ctypes.CDLL("snake_glue")` + `_g.sg_rect(...)` in engine.py into plain
+ * `extern`/`sg_rect(...)` C calls, so these functions are the entire surface
+ * between the rpython game and the kernel. Everything stateful about the
+ * display lives here: a full-resolution back buffer that drawing calls paint
+ * into and sg_present() blits to the Bochs-VBE framebuffer in one pass --
+ * the game never sees tearing and never touches the LFB.
+ *
+ * All parameters are plain ints (colors are 0xRRGGBB) and const char*
+ * strings, matching the ctypes argtypes declared on the rpython side.
+ */
+#include "kernel.h"
+#include "font8x16.h"
+
+static u32 g_back[MBOS_GFX_W * (u32)MBOS_GFX_H];
+
+/* ---- geometry ----------------------------------------------------------- */
+int sg_width(void)  { return (int)gfx_width(); }
+int sg_height(void) { return (int)gfx_height(); }
+
+/* ---- painting into the back buffer -------------------------------------- */
+void sg_clear(int rgb) {
+    u32 n = gfx_width() * gfx_height(), i;
+    for (i = 0; i < n; i++) g_back[i] = (u32)rgb;
+}
+
+void sg_rect(int x, int y, int w, int h, int rgb) {
+    int W = (int)gfx_width(), H = (int)gfx_height();
+    int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
+    int x1 = x + w > W ? W : x + w, y1 = y + h > H ? H : y + h;
+    int i, j;
+    for (j = y0; j < y1; j++)
+        for (i = x0; i < x1; i++)
+            g_back[j * W + i] = (u32)rgb;
+}
+
+/* Alpha-blended fill; alpha 0..256. */
+void sg_rect_a(int x, int y, int w, int h, int rgb, int alpha) {
+    int W = (int)gfx_width(), H = (int)gfx_height();
+    int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
+    int x1 = x + w > W ? W : x + w, y1 = y + h > H ? H : y + h;
+    u32 a = (u32)alpha, na = 256u - a;
+    u32 sr = (((u32)rgb >> 16) & 0xFF) * a;
+    u32 sg = (((u32)rgb >> 8) & 0xFF) * a;
+    u32 sb = ((u32)rgb & 0xFF) * a;
+    int i, j;
+    for (j = y0; j < y1; j++)
+        for (i = x0; i < x1; i++) {
+            u32 dst = g_back[j * W + i];
+            u32 dr = ((dst >> 16) & 0xFF) * na;
+            u32 dg = ((dst >> 8) & 0xFF) * na;
+            u32 db = (dst & 0xFF) * na;
+            g_back[j * W + i] = ((((sr + dr) >> 8) & 0xFF) << 16) |
+                                ((((sg + dg) >> 8) & 0xFF) << 8) |
+                                (((sb + db) >> 8) & 0xFF);
+        }
+}
+
+void sg_circle(int cx, int cy, int r, int rgb) {
+    int W = (int)gfx_width(), H = (int)gfx_height();
+    int x, y, r2 = r * r;
+    for (y = -r; y <= r; y++) {
+        int py = cy + y;
+        if (py < 0 || py >= H) continue;
+        for (x = -r; x <= r; x++) {
+            int px = cx + x;
+            if (px < 0 || px >= W) continue;
+            if (x * x + y * y <= r2) g_back[py * W + px] = (u32)rgb;
+        }
+    }
+}
+
+/* Rounded rectangle; `corners` is a bit mask of which corners get radius r:
+ * 1 = top-left, 2 = top-right, 4 = bottom-left, 8 = bottom-right. The snake
+ * uses this to round only the free ends of head/tail segments. */
+void sg_round_rect(int x, int y, int w, int h, int r, int corners, int rgb) {
+    int W = (int)gfx_width(), H = (int)gfx_height();
+    int i, j;
+    if (r > w / 2) r = w / 2;
+    if (r > h / 2) r = h / 2;
+    for (j = 0; j < h; j++) {
+        int py = y + j;
+        if (py < 0 || py >= H) continue;
+        for (i = 0; i < w; i++) {
+            int px = x + i, dx = -1, dy = -1;
+            if (px < 0 || px >= W) continue;
+            if ((corners & 1) && i < r && j < r)             { dx = r - 1 - i; dy = r - 1 - j; }
+            else if ((corners & 2) && i >= w - r && j < r)   { dx = i - (w - r); dy = r - 1 - j; }
+            else if ((corners & 4) && i < r && j >= h - r)   { dx = r - 1 - i; dy = j - (h - r); }
+            else if ((corners & 8) && i >= w - r && j >= h - r) { dx = i - (w - r); dy = j - (h - r); }
+            if (dx >= 0 && dx * dx + dy * dy > r * r) continue;
+            g_back[py * W + px] = (u32)rgb;
+        }
+    }
+}
+
+/* 8x16 bitmap text (font from mbos), scaled by an integer factor, drawn with
+ * a transparent background so it overlays the scene. */
+void sg_text(int x, int y, const char *s, int rgb, int scale) {
+    int W = (int)gfx_width(), H = (int)gfx_height();
+    int cx = x;
+    if (scale < 1) scale = 1;
+    for (; *s; s++) {
+        unsigned uc = (unsigned char)*s;
+        const u8 *rows;
+        int rx, ry, sx, sy;
+        if (uc < FONT_FIRST || uc > FONT_LAST) uc = ' ';
+        rows = FONT8X16[uc - FONT_FIRST];
+        for (ry = 0; ry < FONT_H; ry++) {
+            u8 bits = rows[ry];
+            for (rx = 0; rx < FONT_W; rx++) {
+                if (!(bits & (0x80 >> rx))) continue;
+                for (sy = 0; sy < scale; sy++) {
+                    int py = y + ry * scale + sy;
+                    if (py < 0 || py >= H) continue;
+                    for (sx = 0; sx < scale; sx++) {
+                        int px = cx + rx * scale + sx;
+                        if (px < 0 || px >= W) continue;
+                        g_back[py * W + px] = (u32)rgb;
+                    }
+                }
+            }
+        }
+        cx += FONT_W * scale;
+    }
+}
+
+int sg_text_width(const char *s, int scale) {
+    if (scale < 1) scale = 1;
+    return (int)mini_strlen(s) * FONT_W * scale;
+}
+
+/* ---- baked sprites (sprites.c, generated from the original art) --------- */
+typedef struct { int w, h; const unsigned int *px; } Sprite;
+extern const Sprite SPRITES[];
+extern const int SPRITE_COUNT;
+
+/* Scaled, alpha-blended, optionally tinted + quarter-rotated sprite blit.
+ * tint is 0xRRGGBB multiplied into the texel (0xFFFFFF = untinted); alpha
+ * 0..256 scales the texel's own alpha; rot counts 90-degree CCW turns. */
+void sg_sprite(int id, int x, int y, int w, int h, int tint, int alpha,
+               int rot) {
+    int W = (int)gfx_width(), H = (int)gfx_height();
+    const Sprite *sp;
+    int i, j;
+    u32 tr, tg, tb;
+    if (id < 0 || id >= SPRITE_COUNT || w <= 0 || h <= 0) return;
+    sp = &SPRITES[id];
+    tr = ((u32)tint >> 16) & 0xFF; tg = ((u32)tint >> 8) & 0xFF; tb = (u32)tint & 0xFF;
+    for (j = 0; j < h; j++) {
+        int py = y + j;
+        if (py < 0 || py >= H) continue;
+        for (i = 0; i < w; i++) {
+            int px = x + i, u, v, sx, sy;
+            u32 texel, a, r, g, b, dst, dr, dg, db;
+            if (px < 0 || px >= W) continue;
+            /* map dest (i,j) into sprite space with rotation */
+            switch (rot & 3) {
+                default:
+                    sx = i * sp->w / w;           sy = j * sp->h / h;
+                    break;
+                case 1:  /* 90 CCW: sprite top edge -> dest left edge */
+                    sx = (h - 1 - j) * sp->w / h; sy = i * sp->h / w;
+                    break;
+                case 2:
+                    sx = (w - 1 - i) * sp->w / w; sy = (h - 1 - j) * sp->h / h;
+                    break;
+                case 3:  /* 90 CW */
+                    sx = j * sp->w / h;           sy = (w - 1 - i) * sp->h / w;
+                    break;
+            }
+            (void)u; (void)v;
+            texel = sp->px[sy * sp->w + sx];
+            a = (texel >> 24) & 0xFF;
+            a = (a * (u32)alpha) >> 8;
+            if (a == 0) continue;
+            r = ((texel >> 16) & 0xFF) * tr / 255;
+            g = ((texel >> 8) & 0xFF) * tg / 255;
+            b = (texel & 0xFF) * tb / 255;
+            dst = g_back[py * W + px];
+            dr = (dst >> 16) & 0xFF; dg = (dst >> 8) & 0xFF; db = dst & 0xFF;
+            dr = (r * a + dr * (255 - a)) / 255;
+            dg = (g * a + dg * (255 - a)) / 255;
+            db = (b * a + db * (255 - a)) / 255;
+            g_back[py * W + px] = (dr << 16) | (dg << 8) | db;
+        }
+    }
+}
+
+int sg_sprite_w(int id) { return (id >= 0 && id < SPRITE_COUNT) ? SPRITES[id].w : 1; }
+int sg_sprite_h(int id) { return (id >= 0 && id < SPRITE_COUNT) ? SPRITES[id].h : 1; }
+
+/* ---- present: back buffer -> framebuffer -------------------------------- */
+void sg_present(void) {
+    u32 W = gfx_width(), H = gfx_height(), y, x;
+    for (y = 0; y < H; y++)
+        for (x = 0; x < W; x++)
+            gfx_pixel(x, y, g_back[y * W + x]);
+}
+
+/* ---- input / time / sound / debug --------------------------------------- */
+int  sg_key_event(void) { return kb_poll(); }   /* -1, or code|release<<7|ext<<8 */
+int  sg_ms(void)        { return (int)time_ms(); }
+void sg_beep(int hz)    { spk_on((u32)hz); }
+void sg_quiet(void)     { spk_off(); }
+void sg_log(const char *s) { ser_puts(s); ser_puts("\n"); }

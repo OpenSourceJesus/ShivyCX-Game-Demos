@@ -1,0 +1,5 @@
+# Host-side tooling only -- the game itself runs on bare metal with no
+# dependencies. Pillow is used by tools/extract_levels.py (baking sprite art
+# from the original Unity project) and by test.py/tools/soak_test.py (PPM ->
+# PNG screenshot conversion).
+pillow>=10.0
