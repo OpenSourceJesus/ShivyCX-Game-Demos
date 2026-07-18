@@ -2421,6 +2421,50 @@ class Game:
         engine.sprite_ex(sid, px + (cell - w) // 2, py + (cell - h) // 2,
                          w, h, tint, alpha, rot)
 
+    def draw_dotted_line(self, x0: int, y0: int, x1: int, y1: int,
+                         rgb: int, alpha: int) -> None:
+        """Dotted segment matching Connectable LineRenderer (width ~0.1)."""
+        dx = x1 - x0
+        dy = y1 - y0
+        adx = dx
+        if adx < 0:
+            adx = -adx
+        ady = dy
+        if ady < 0:
+            ady = -ady
+        dist = adx + ady
+        if dist < 1:
+            return
+        step = self.cell // 4
+        if step < 4:
+            step = 4
+        n = dist // step
+        if n < 1:
+            n = 1
+        seg = 0
+        while seg <= n:
+            lx = x0 + dx * seg // n
+            ly = y0 + dy * seg // n
+            engine.rect_a(lx - 3, ly - 3, 6, 6, rgb, alpha)
+            seg = seg + 1
+
+    def draw_connectable_line(self, zx: int, zy: int, bi: int,
+                              rgb: int) -> None:
+        """Zone/portal → box/bomb line; alpha matches line.startColor.a."""
+        if bi < 0:
+            return
+        if bi >= len(self.boxx):
+            return
+        if self.boxlive[bi] == 0:
+            return
+        cell = self.cell
+        x0 = self.cell_px(zx) + cell // 2
+        y0 = self.cell_py(zy) + cell // 2
+        x1 = self.cell_px(self.boxx[bi]) + cell // 2
+        y1 = self.cell_py(self.boxy[bi]) + cell // 2
+        # startColor.a = 0.2509804 → 64/256
+        self.draw_dotted_line(x0, y0, x1, y1, rgb, 64)
+
     def draw_board(self, tms: int) -> None:
         # static layer from the scene cache, animated entities on top
         if self.dirty == 1:
@@ -2503,22 +2547,6 @@ class Game:
             # 300px art at 250 ppu, prefab scale 0.97 -> 1.164 cells
             self.cspr_ex(sid, px, py, 298, 298, self.padcol[i], 256, 0)
             i = i + 1
-        # portal pair links (rotating portal sprites are dynamic, order 250)
-        i = 0
-        while i < len(self.porx):
-            oi = self.portal_other(i)
-            if oi > i:
-                x0 = self.cell_px(self.porx[i]) + cell // 2
-                y0 = self.cell_py(self.pory[i]) + cell // 2
-                x1 = self.cell_px(self.porx[oi]) + cell // 2
-                y1 = self.cell_py(self.pory[oi]) + cell // 2
-                seg = 0
-                while seg <= 24:
-                    lx = x0 + (x1 - x0) * seg // 24
-                    ly = y0 + (y1 - y0) * seg // 24
-                    engine.rect_a(lx - 1, ly - 1, 3, 3, self.porcol[i], 64)
-                    seg = seg + 1
-            i = i + 1
         # grid overlay last in the static bake so it sits on walls/pads
         # (the original Show Grid setting, default on)
         if self.gridon == 1:
@@ -2535,6 +2563,13 @@ class Game:
         cell = self.cell
         # Cell-relative sprite sizes (1/256ths) below mirror Unity's
         # texture / pixelsPerUnit * prefab scale for each object.
+        # Portal→carrier lines: Connectable.line sortingOrder 249, startColor
+        # (0,1,1,a≈0.25) from Portal.prefab LineRenderer gradient.
+        i = 0
+        while i < len(self.porx):
+            self.draw_connectable_line(self.porx[i], self.pory[i],
+                                       self.porbox[i], 65535)
+            i = i + 1
         # rotating portal sprites (order 250), prefab scale 0.9
         i = 0
         while i < len(self.porx):
@@ -2547,6 +2582,18 @@ class Game:
         # End prefab: 236x260 art at 260 ppu, scale 0.53
         self.cspr(engine.SPR_APPLE, self.cell_px(self.ax),
                   self.cell_py(self.ay), 123, 136)
+        # Propel/Load→carrier lines: sortingOrder 299. Colors from each
+        # zone prefab's Connectable.line.startColor (a≈0.25).
+        i = 0
+        while i < len(self.connx):
+            t = self.conntype[i]
+            if t == 1:
+                self.draw_connectable_line(self.connx[i], self.conny[i],
+                                           self.connbox[i], 16744703)
+            if t == 3:
+                self.draw_connectable_line(self.connx[i], self.conny[i],
+                                           self.connbox[i], 16744448)
+            i = i + 1
         i = 0
         while i < len(self.boxx):
             if self.boxlive[i] == 1:
@@ -2567,6 +2614,13 @@ class Game:
         while si < self.nsnakes:
             self.draw_snake(si, tms)
             si = si + 1
+        # Save→carrier lines: sortingOrder 399, startColor (0,0,1,a≈0.25)
+        i = 0
+        while i < len(self.connx):
+            if self.conntype[i] == 2:
+                self.draw_connectable_line(self.connx[i], self.conny[i],
+                                           self.connbox[i], 255)
+            i = i + 1
         # Bugs and the foreground renderer of propel zones are order 400 in
         # the Unity prefabs, so both belong in front of snakes.
         i = 0
