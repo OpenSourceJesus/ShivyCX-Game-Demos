@@ -156,10 +156,14 @@ class Game:
         self.boxy: "list[int]" = []
         self.boxz: "list[int]" = []
         self.boxlive: "list[int]" = []
+        self.boxvx: "list[int]" = []       # visual pos, 1/256 cell
+        self.boxvy: "list[int]" = []
 
         self.bombx: "list[int]" = []
         self.bomby: "list[int]" = []
         self.bomblive: "list[int]" = []
+        self.bombvx: "list[int]" = []
+        self.bombvy: "list[int]" = []
         # pit-triggered blasts wait for the move to finish (the original
         # queues in Pit/TryPush and flushes at the end of Snake.Move), so
         # the pusher ends up inside the 3x3 blast zone before it fires
@@ -513,9 +517,13 @@ class Game:
         self.boxy = []
         self.boxz = []
         self.boxlive = []
+        self.boxvx = []
+        self.boxvy = []
         self.bombx = []
         self.bomby = []
         self.bomblive = []
+        self.bombvx = []
+        self.bombvy = []
         self.bombq = []
         self.porx = []
         self.pory = []
@@ -591,10 +599,14 @@ class Game:
                 self.boxy.append(y)
                 self.boxz.append(0)
                 self.boxlive.append(1)
+                self.boxvx.append(x * 256)
+                self.boxvy.append(y * 256)
             elif op2 == "M":
                 self.bombx.append(x)
                 self.bomby.append(y)
                 self.bomblive.append(1)
+                self.bombvx.append(x * 256)
+                self.bombvy.append(y * 256)
             elif op2 == "A":
                 self.ax = x
                 self.ay = y
@@ -971,6 +983,7 @@ class Game:
             self.bomblive[i] = d[k + 2]
             k = k + 3
             i = i + 1
+        self.snap_obj_visuals()
         i = 0
         n = len(self.swarmx)
         while i < n:
@@ -2469,6 +2482,23 @@ class Game:
         h = cell * hf // 256
         engine.sprite(sid, px + (cell - w) // 2, py + (cell - h) // 2, w, h)
 
+    def drop_off(self) -> int:
+        """Pixel offset for drop shadows (left and down)."""
+        soff = self.cell // 16
+        if soff < 1:
+            return 1
+        return soff
+
+    def cspr_drop(self, sid: int, px: int, py: int, wf: int, hf: int,
+                  off_scale: int) -> None:
+        """Sprite with a soft black drop shadow below and to the left.
+        off_scale is in 256ths of the normal drop offset (256 = full)."""
+        soff = self.drop_off() * off_scale // 256
+        if soff < 1:
+            soff = 1
+        self.cspr_ex(sid, px - soff, py + soff, wf, hf, 0, 128, 0)
+        self.cspr(sid, px, py, wf, hf)
+
     def cspr_ex(self, sid: int, px: int, py: int, wf: int, hf: int,
                 tint: int, alpha: int, rot: int) -> None:
         cell = self.cell
@@ -2519,8 +2549,8 @@ class Game:
         cell = self.cell
         x0 = self.cell_px(zx) + cell // 2
         y0 = self.cell_py(zy) + cell // 2
-        x1 = self.cell_px(self.boxx[bi]) + cell // 2
-        y1 = self.cell_py(self.boxy[bi]) + cell // 2
+        x1 = self.ox + (self.boxvx[bi] * cell) // 256 + cell // 2
+        y1 = self.oy - (self.boxvy[bi] * cell) // 256 + cell // 2
         # startColor.a = 0.2509804 → 64/256
         self.draw_dotted_line(x0, y0, x1, y1, rgb, 64)
 
@@ -2662,15 +2692,20 @@ class Game:
             if self.boxlive[i] == 1:
                 if self.boxz[i] == 0:
                     # Box prefab: 244x236 art at 244 ppu, scale 0.7
-                    self.cspr(engine.SPR_BOX, self.cell_px(self.boxx[i]),
-                              self.cell_py(self.boxy[i]), 179, 173)
+                    self.cspr_drop(engine.SPR_BOX,
+                                   self.ox + (self.boxvx[i] * cell) // 256,
+                                   self.oy - (self.boxvy[i] * cell) // 256,
+                                   179, 173, 256)
             i = i + 1
         i = 0
         while i < len(self.bombx):
             if self.bomblive[i] == 1:
                 # Bomb prefab: 257x286 art at 286 ppu, scale 0.9
-                self.cspr(engine.SPR_BOMB, self.cell_px(self.bombx[i]),
-                          self.cell_py(self.bomby[i]), 207, 230)
+                # Shadow sits .65× as far as boxes/snakes (166/256).
+                self.cspr_drop(engine.SPR_BOMB,
+                               self.ox + (self.bombvx[i] * cell) // 256,
+                               self.oy - (self.bombvy[i] * cell) // 256,
+                               207, 230, 166)
             i = i + 1
         # snakes (order 300/302)
         si = 0
@@ -2811,112 +2846,128 @@ class Game:
             j = j + 1
         if m == 0:
             return
-        if m == 1:
-            dark = col
-            if self.sn_cz[0] == 1:
-                dark = (s.colr // 3) * 65536 + (s.colg // 3) * 256 + \
-                    s.colb // 3
-            engine.circle(self.sn_cx[0], self.sn_cy[0], br, dark)
-        else:
-            # Tangents match Snake.BuildGridKnot: straight arms use 1/2 the
-            # neighbour delta; 90° corners use Unity's
-            # (4/3)·tan(π/8) ≈ 0.552 handle along the chord (prev→next).
-            k = 0
-            while k < m:
-                self.sn_tinx[k] = 0
-                self.sn_tiny[k] = 0
-                self.sn_toux[k] = 0
-                self.sn_touy[k] = 0
-                is_c = 0
-                if k > 0:
-                    if k < m - 1:
-                        dpx = self.sn_cx[k - 1] - self.sn_cx[k]
-                        dpy = self.sn_cy[k - 1] - self.sn_cy[k]
-                        dnx = self.sn_cx[k + 1] - self.sn_cx[k]
-                        dny = self.sn_cy[k + 1] - self.sn_cy[k]
-                        if dpx + dnx != 0:
-                            is_c = 1
-                        elif dpy + dny != 0:
-                            is_c = 1
-                self.sn_corner[k] = is_c
-                k = k + 1
-            # KnotCornerTangentScale in 1/256ths of a cell
-            cscale = 141
-            k = 0
-            while k < m:
-                if self.sn_corner[k] == 1:
-                    cdx = self.sn_cx[k + 1] - self.sn_cx[k - 1]
-                    cdy = self.sn_cy[k + 1] - self.sn_cy[k - 1]
-                    L = self._isqrt(cdx * cdx + cdy * cdy)
-                    if L > 0:
-                        hl = cell * cscale // 256
-                        self.sn_tinx[k] = (0 - cdx) * hl // L
-                        self.sn_tiny[k] = (0 - cdy) * hl // L
-                        self.sn_toux[k] = cdx * hl // L
-                        self.sn_touy[k] = cdy * hl // L
-                else:
-                    if k > 0:
-                        sc = 128
-                        if self.sn_corner[k - 1] == 1:
-                            sc = cscale
-                        if k < m - 1:
-                            if self.sn_corner[k + 1] == 1:
-                                sc = cscale
-                        self.sn_tinx[k] = (self.sn_cx[k - 1] - self.sn_cx[k]) \
-                            * sc // 256
-                        self.sn_tiny[k] = (self.sn_cy[k - 1] - self.sn_cy[k]) \
-                            * sc // 256
-                    if k < m - 1:
-                        sc = 128
-                        if self.sn_corner[k + 1] == 1:
-                            sc = cscale
+        soff = self.drop_off()
+        # Shadow pass (half-dark gray, offset below-left) then the body.
+        passn = 0
+        while passn < 2:
+            dxo = 0
+            dyo = 0
+            if passn == 0:
+                dxo = 0 - soff
+                dyo = soff
+            if m == 1:
+                dark = 4210752              # 0x404040 — .5× darker than mid-gray
+                if passn == 1:
+                    dark = col
+                    if self.sn_cz[0] == 1:
+                        dark = (s.colr // 3) * 65536 + (s.colg // 3) * 256 + \
+                            s.colb // 3
+                engine.circle(self.sn_cx[0] + dxo, self.sn_cy[0] + dyo, br,
+                              dark)
+            else:
+                if passn == 0:
+                    # Tangents match Snake.BuildGridKnot: straight arms use
+                    # 1/2 the neighbour delta; 90° corners use Unity's
+                    # (4/3)·tan(π/8) ≈ 0.552 handle along the chord.
+                    k = 0
+                    while k < m:
+                        self.sn_tinx[k] = 0
+                        self.sn_tiny[k] = 0
+                        self.sn_toux[k] = 0
+                        self.sn_touy[k] = 0
+                        is_c = 0
                         if k > 0:
-                            if self.sn_corner[k - 1] == 1:
-                                sc = cscale
-                        self.sn_toux[k] = (self.sn_cx[k + 1] - self.sn_cx[k]) \
-                            * sc // 256
-                        self.sn_touy[k] = (self.sn_cy[k + 1] - self.sn_cy[k]) \
-                            * sc // 256
-                k = k + 1
-            # Stroke each cubic Bezier segment with overlapping circles.
-            samples = cell // 4
-            if samples < 8:
-                samples = 8
-            k = 0
-            while k < m - 1:
-                p0x = self.sn_cx[k]
-                p0y = self.sn_cy[k]
-                p1x = self.sn_cx[k] + self.sn_toux[k]
-                p1y = self.sn_cy[k] + self.sn_touy[k]
-                p2x = self.sn_cx[k + 1] + self.sn_tinx[k + 1]
-                p2y = self.sn_cy[k + 1] + self.sn_tiny[k + 1]
-                p3x = self.sn_cx[k + 1]
-                p3y = self.sn_cy[k + 1]
-                dark = col
-                if self.sn_cz[k] == 1:
-                    dark = (s.colr // 3) * 65536 + (s.colg // 3) * 256 + \
-                        s.colb // 3
-                elif self.sn_cz[k + 1] == 1:
-                    dark = (s.colr // 3) * 65536 + (s.colg // 3) * 256 + \
-                        s.colb // 3
-                t = 0
-                while t <= samples:
-                    # de Casteljau in integer t/samples
-                    ax = p0x + (p1x - p0x) * t // samples
-                    ay = p0y + (p1y - p0y) * t // samples
-                    bx = p1x + (p2x - p1x) * t // samples
-                    by = p1y + (p2y - p1y) * t // samples
-                    ux = p2x + (p3x - p2x) * t // samples
-                    uy = p2y + (p3y - p2y) * t // samples
-                    dx0 = ax + (bx - ax) * t // samples
-                    dy0 = ay + (by - ay) * t // samples
-                    ex = bx + (ux - bx) * t // samples
-                    ey = by + (uy - by) * t // samples
-                    px = dx0 + (ex - dx0) * t // samples
-                    py = dy0 + (ey - dy0) * t // samples
-                    engine.circle(px, py, br, dark)
-                    t = t + 1
-                k = k + 1
+                            if k < m - 1:
+                                dpx = self.sn_cx[k - 1] - self.sn_cx[k]
+                                dpy = self.sn_cy[k - 1] - self.sn_cy[k]
+                                dnx = self.sn_cx[k + 1] - self.sn_cx[k]
+                                dny = self.sn_cy[k + 1] - self.sn_cy[k]
+                                if dpx + dnx != 0:
+                                    is_c = 1
+                                elif dpy + dny != 0:
+                                    is_c = 1
+                        self.sn_corner[k] = is_c
+                        k = k + 1
+                    # KnotCornerTangentScale in 1/256ths of a cell
+                    cscale = 141
+                    k = 0
+                    while k < m:
+                        if self.sn_corner[k] == 1:
+                            cdx = self.sn_cx[k + 1] - self.sn_cx[k - 1]
+                            cdy = self.sn_cy[k + 1] - self.sn_cy[k - 1]
+                            L = self._isqrt(cdx * cdx + cdy * cdy)
+                            if L > 0:
+                                hl = cell * cscale // 256
+                                self.sn_tinx[k] = (0 - cdx) * hl // L
+                                self.sn_tiny[k] = (0 - cdy) * hl // L
+                                self.sn_toux[k] = cdx * hl // L
+                                self.sn_touy[k] = cdy * hl // L
+                        else:
+                            if k > 0:
+                                sc = 128
+                                if self.sn_corner[k - 1] == 1:
+                                    sc = cscale
+                                if k < m - 1:
+                                    if self.sn_corner[k + 1] == 1:
+                                        sc = cscale
+                                self.sn_tinx[k] = (self.sn_cx[k - 1] -
+                                                   self.sn_cx[k]) * sc // 256
+                                self.sn_tiny[k] = (self.sn_cy[k - 1] -
+                                                   self.sn_cy[k]) * sc // 256
+                            if k < m - 1:
+                                sc = 128
+                                if self.sn_corner[k + 1] == 1:
+                                    sc = cscale
+                                if k > 0:
+                                    if self.sn_corner[k - 1] == 1:
+                                        sc = cscale
+                                self.sn_toux[k] = (self.sn_cx[k + 1] -
+                                                   self.sn_cx[k]) * sc // 256
+                                self.sn_touy[k] = (self.sn_cy[k + 1] -
+                                                   self.sn_cy[k]) * sc // 256
+                        k = k + 1
+                # Stroke each cubic Bezier segment with overlapping circles.
+                samples = cell // 4
+                if samples < 8:
+                    samples = 8
+                k = 0
+                while k < m - 1:
+                    p0x = self.sn_cx[k] + dxo
+                    p0y = self.sn_cy[k] + dyo
+                    p1x = self.sn_cx[k] + self.sn_toux[k] + dxo
+                    p1y = self.sn_cy[k] + self.sn_touy[k] + dyo
+                    p2x = self.sn_cx[k + 1] + self.sn_tinx[k + 1] + dxo
+                    p2y = self.sn_cy[k + 1] + self.sn_tiny[k + 1] + dyo
+                    p3x = self.sn_cx[k + 1] + dxo
+                    p3y = self.sn_cy[k + 1] + dyo
+                    dark = 4210752          # .5× darker than mid-gray shadow
+                    if passn == 1:
+                        dark = col
+                        if self.sn_cz[k] == 1:
+                            dark = (s.colr // 3) * 65536 + \
+                                (s.colg // 3) * 256 + s.colb // 3
+                        elif self.sn_cz[k + 1] == 1:
+                            dark = (s.colr // 3) * 65536 + \
+                                (s.colg // 3) * 256 + s.colb // 3
+                    t = 0
+                    while t <= samples:
+                        # de Casteljau in integer t/samples
+                        ax = p0x + (p1x - p0x) * t // samples
+                        ay = p0y + (p1y - p0y) * t // samples
+                        bx = p1x + (p2x - p1x) * t // samples
+                        by = p1y + (p2y - p1y) * t // samples
+                        ux = p2x + (p3x - p2x) * t // samples
+                        uy = p2y + (p3y - p2y) * t // samples
+                        dx0 = ax + (bx - ax) * t // samples
+                        dy0 = ay + (by - ay) * t // samples
+                        ex = bx + (ux - bx) * t // samples
+                        ey = by + (uy - by) * t // samples
+                        px = dx0 + (ex - dx0) * t // samples
+                        py = dy0 + (ey - dy0) * t // samples
+                        engine.circle(px, py, br, dark)
+                        t = t + 1
+                    k = k + 1
+            passn = passn + 1
         # face (only while the original head part survives: headless
         # corpses and fragments from a bomb blast show no eyes)
         if n > 0:
@@ -2993,7 +3044,9 @@ class Game:
         chh = cw * engine.sprite_h(engine.SPR_CONGRATS) // \
             engine.sprite_w(engine.SPR_CONGRATS)
         engine.rect_a(0, 0, sw, sh, 0, 100)
-        engine.sprite(engine.SPR_CONGRATS, (sw - cw) // 2, sh // 6, cw, chh)
+        # Centered, then nudged 4% of screen height toward the top.
+        engine.sprite(engine.SPR_CONGRATS, (sw - cw) // 2,
+                      (sh - chh) // 2 - sh * 4 // 100, cw, chh)
         # nine confetti, drifting down
         i = 0
         while i < 9:
@@ -3011,6 +3064,109 @@ class Game:
             i = i + 1
 
     # ------------------------------------------------------------ animation
+
+    def snap_obj_visuals(self) -> None:
+        """Snap box/bomb visuals to logical cells (undo, load, teleport)."""
+        i = 0
+        n = len(self.boxx)
+        while i < n:
+            if i < len(self.boxvx):
+                self.boxvx[i] = self.boxx[i] * 256
+                self.boxvy[i] = self.boxy[i] * 256
+            else:
+                self.boxvx.append(self.boxx[i] * 256)
+                self.boxvy.append(self.boxy[i] * 256)
+            i = i + 1
+        while len(self.boxvx) > len(self.boxx):
+            self.boxvx.pop()
+            self.boxvy.pop()
+        i = 0
+        n = len(self.bombx)
+        while i < n:
+            if i < len(self.bombvx):
+                self.bombvx[i] = self.bombx[i] * 256
+                self.bombvy[i] = self.bomby[i] * 256
+            else:
+                self.bombvx.append(self.bombx[i] * 256)
+                self.bombvy.append(self.bomby[i] * 256)
+            i = i + 1
+        while len(self.bombvx) > len(self.bombx):
+            self.bombvx.pop()
+            self.bombvy.pop()
+
+    def _vis_cell(self, v: int) -> int:
+        """Nearest cell index for a 1/256 visual coordinate."""
+        if v >= 0:
+            return (v + 128) // 256
+        return (v - 128) // 256
+
+    def _manhattan256(self, ax: int, ay: int, bx: int, by: int) -> int:
+        dx = ax - bx
+        if dx < 0:
+            dx = 0 - dx
+        dy = ay - by
+        if dy < 0:
+            dy = 0 - dy
+        return dx + dy
+
+    def push_contact_ready(self, vx: int, vy: int, self_box: int,
+                           self_bomb: int) -> int:
+        """1 if the pusher has visually touched this object.
+
+        A pushed box/bomb stays put until the entity crawling onto its
+        visual cell reaches sprite-contact distance (edge hit, not cell
+        centre), then slides at crawl speed. self_box/self_bomb skip this
+        object so it cannot freeze itself mid-slide.
+        """
+        cx = self._vis_cell(vx)
+        cy = self._vis_cell(vy)
+        # Half-extents in 1/256ths of a cell (match drawn sprite scales).
+        obj_r = 90                         # box ~179/256 wide
+        if self_bomb >= 0:
+            obj_r = 104                    # bomb ~207/256 wide
+        snake_r = 56                       # head disk ≈ cell/4.5
+        box_r = 90
+        bomb_r = 104
+        si = 0
+        while si < self.nsnakes:
+            s = self.snake(si)
+            if s.gone == 0:
+                if s.npart() > 0:
+                    if s.xs[0] == cx:
+                        if s.ys[0] == cy:
+                            if len(s.vx) > 0:
+                                hit = obj_r + snake_r
+                                if self._manhattan256(s.vx[0], s.vy[0],
+                                                      vx, vy) > hit:
+                                    return 0
+            si = si + 1
+        i = 0
+        while i < len(self.boxx):
+            if i != self_box:
+                if self.boxlive[i] == 1:
+                    if self.boxx[i] == cx:
+                        if self.boxy[i] == cy:
+                            if i < len(self.boxvx):
+                                hit = obj_r + box_r
+                                if self._manhattan256(self.boxvx[i],
+                                                      self.boxvy[i],
+                                                      vx, vy) > hit:
+                                    return 0
+            i = i + 1
+        i = 0
+        while i < len(self.bombx):
+            if i != self_bomb:
+                if self.bomblive[i] == 1:
+                    if self.bombx[i] == cx:
+                        if self.bomby[i] == cy:
+                            if i < len(self.bombvx):
+                                hit = obj_r + bomb_r
+                                if self._manhattan256(self.bombvx[i],
+                                                      self.bombvy[i],
+                                                      vx, vy) > hit:
+                                    return 0
+            i = i + 1
+        return 1
 
     def animate(self, dtms: int) -> None:
         step = (dtms * 256) // CRAWL_MS     # 1 cell per CRAWL_MS
@@ -3051,6 +3207,83 @@ class Game:
                     s.vy[j] = vy
                 j = j + 1
             si = si + 1
+        # Boxes/bombs: wait until the pusher visually arrives, then crawl.
+        i = 0
+        while i < len(self.boxx):
+            if self.boxlive[i] == 1:
+                if i < len(self.boxvx):
+                    tx = self.boxx[i] * 256
+                    ty = self.boxy[i] * 256
+                    vx = self.boxvx[i]
+                    vy = self.boxvy[i]
+                    ddx = tx - vx
+                    ddy = ty - vy
+                    if ddx > 512:
+                        vx = tx
+                        vy = ty
+                    elif ddx < -512:
+                        vx = tx
+                        vy = ty
+                    elif ddy > 512:
+                        vx = tx
+                        vy = ty
+                    elif ddy < -512:
+                        vx = tx
+                        vy = ty
+                    elif self.push_contact_ready(vx, vy, i, -1) == 1:
+                        if ddx > step:
+                            vx = vx + step
+                        elif ddx < 0 - step:
+                            vx = vx - step
+                        else:
+                            vx = tx
+                        if ddy > step:
+                            vy = vy + step
+                        elif ddy < 0 - step:
+                            vy = vy - step
+                        else:
+                            vy = ty
+                    self.boxvx[i] = vx
+                    self.boxvy[i] = vy
+            i = i + 1
+        i = 0
+        while i < len(self.bombx):
+            if self.bomblive[i] == 1:
+                if i < len(self.bombvx):
+                    tx = self.bombx[i] * 256
+                    ty = self.bomby[i] * 256
+                    vx = self.bombvx[i]
+                    vy = self.bombvy[i]
+                    ddx = tx - vx
+                    ddy = ty - vy
+                    if ddx > 512:
+                        vx = tx
+                        vy = ty
+                    elif ddx < -512:
+                        vx = tx
+                        vy = ty
+                    elif ddy > 512:
+                        vx = tx
+                        vy = ty
+                    elif ddy < -512:
+                        vx = tx
+                        vy = ty
+                    elif self.push_contact_ready(vx, vy, -1, i) == 1:
+                        if ddx > step:
+                            vx = vx + step
+                        elif ddx < 0 - step:
+                            vx = vx - step
+                        else:
+                            vx = tx
+                        if ddy > step:
+                            vy = vy + step
+                        elif ddy < 0 - step:
+                            vy = vy - step
+                        else:
+                            vy = ty
+                    self.bombvx[i] = vx
+                    self.bombvy[i] = vy
+            i = i + 1
 
     # ------------------------------------------------------------- screens
 
@@ -3064,7 +3297,9 @@ class Game:
             engine.sprite_w(engine.SPR_TITLE)
         engine.sprite(engine.SPR_TITLE, (sw - tw) // 2, sh // 8, tw, th)
         if (tms // 500) % 2 == 0:
-            engine.text_centered(sw // 2, sh * 2 // 3,
+            # Halfway between the title's bottom and the old 2/3 mark.
+            press_y = (sh // 8 + th + sh * 2 // 3) // 2
+            engine.text_centered(sw // 2, press_y,
                                  "PRESS ENTER", 16777215, self.ut(4))
         engine.text_centered(sw // 2, sh - self.uy(60),
                              "A BAREMETAL RPYTHON DEMAKE OF SNAKE-GAME",
