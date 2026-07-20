@@ -1,6 +1,6 @@
 # snake -- a bare-metal remake of ~/snake-game, written in rpython and
 # translated to C by ShivyC's tools/py2c.py, rendered through the mbos
-# hi-res Bochs-VBE graphics path (1920x1080x32).
+# Bochs-VBE graphics path (default GFX_DIV=3 → 640x360).
 #
 #   make            build build/snake.elf
 #   make run        boot in a QEMU window
@@ -22,10 +22,13 @@ ELF    := $(BUILD)/snake.elf
 CC := gcc
 LD := ld
 
-# The mbos hi-res geometry: 1920x1080 needs more VRAM than std VGA's 16 MiB
-# default, hence `-vga none -device VGA,vgamem_mb=64` on every QEMU line.
-GFX_W ?= 1920
-GFX_H ?= 1080
+# Divide the 1920x1080 authoring size by GFX_DIV for the window.
+# Example: GFX_DIV=3 → 640x360; GFX_DIV=1 → full 1920x1080.
+# Changing GFX_DIV must rebuild C objects (framebuffer arrays embed W×H).
+GFX_DIV ?= 3
+GFX_W := $(shell expr 1920 / $(GFX_DIV))
+GFX_H := $(shell expr 1080 / $(GFX_DIV))
+GFX_TAG := $(BUILD)/gfx_$(GFX_DIV)_$(GFX_W)x$(GFX_H).tag
 
 # 64-bit freestanding, exactly the mbos rpython-path flags, with a roomier
 # runtime arena (2^26 = 64 MiB) since a game session allocates indefinitely
@@ -33,13 +36,17 @@ GFX_H ?= 1080
 CFLAGS := -m64 -std=c11 -ffreestanding -fno-pic -mno-red-zone \
           -fno-stack-protector -fno-builtin -nostdlib -mcmodel=small -w -O2 \
           -DSHIVYC_ARENA_LOG2=26 \
+          -DMBOS_GFX_DIV=$(GFX_DIV) \
           -DMBOS_GFX_W=$(GFX_W) -DMBOS_GFX_H=$(GFX_H) \
           -Irpy/freestanding_inc -Igen -I.
 LDFLAGS := -n -T linker64.ld -nostdlib
 
 QEMU      := qemu-system-x86_64
 QEMU_VGA  := -vga none -device VGA,vgamem_mb=64
-QEMU_FLAGS := -kernel $(ELF) -no-reboot -m 256 -accel kvm -accel tcg $(QEMU_VGA)
+# Keep guest pixels 1:1 in the window (no zoom-to-fit upscale).
+QEMU_DISPLAY := -display gtk,zoom-to-fit=off
+QEMU_FLAGS := -kernel $(ELF) -no-reboot -m 256 -accel kvm -accel tcg \
+              $(QEMU_VGA) $(QEMU_DISPLAY)
 
 # ---- rpython -> C --------------------------------------------------------
 RPY_SRC := rpy/game.py rpy/engine.py rpy/levels.py
@@ -62,16 +69,22 @@ OBJS := $(BUILD)/boot64.o \
 $(BUILD):
 	@mkdir -p $(BUILD)
 
-$(BUILD)/boot64.o: boot64.S | $(BUILD)
+# New GFX_DIV → new tag name → wipe objects compiled for the old size.
+$(GFX_TAG): | $(BUILD)
+	@rm -f $(BUILD)/gfx_*.tag $(OBJS) $(ELF)
+	@touch $@
+	@echo "graphics $(GFX_W)x$(GFX_H) (GFX_DIV=$(GFX_DIV))"
+
+$(BUILD)/boot64.o: boot64.S $(GFX_TAG) | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/%.o: %.c kernel.h mbos.h font8x16.h | $(BUILD)
+$(BUILD)/%.o: %.c kernel.h mbos.h font8x16.h $(GFX_TAG) | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/gen_%.o: gen/%.c $(GEN) | $(BUILD)
+$(BUILD)/gen_%.o: gen/%.c $(GEN) $(GFX_TAG) | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/rt_freestanding.o: rpy/rt_freestanding.c kernel.h mbos.h | $(BUILD)
+$(BUILD)/rt_freestanding.o: rpy/rt_freestanding.c kernel.h mbos.h $(GFX_TAG) | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(ELF): $(OBJS) linker64.ld | $(BUILD)

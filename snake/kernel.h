@@ -67,14 +67,17 @@ void gfx_glyph(const u8 *rows, u32 px, u32 py, u32 fg, u32 bg);
 void gfx_scroll(u32 dy, u32 bg);
 void gfx_present(const u32 *src); /* bulk full-frame copy into the LFB      */
 
-/* Default graphics geometry: the mbos hi-res mode (1920x1080 needs
- * `-vga none -device VGA,vgamem_mb=64`; see Makefile). vbe.c reads these
- * macro names, keep them as in mbos.h. */
+/* Display geometry: authored for 1920x1080, window is that size divided
+ * by MBOS_GFX_DIV (Makefile GFX_DIV, default 3 → 640x360). Override
+ * DIV and/or W/H via -D. vbe.c reads MBOS_GFX_W/H. */
+#ifndef MBOS_GFX_DIV
+#define MBOS_GFX_DIV 3
+#endif
 #ifndef MBOS_GFX_W
-#define MBOS_GFX_W 1920
+#define MBOS_GFX_W (1920 / MBOS_GFX_DIV)
 #endif
 #ifndef MBOS_GFX_H
-#define MBOS_GFX_H 1080
+#define MBOS_GFX_H (1080 / MBOS_GFX_DIV)
 #endif
 
 #endif /* KERNEL_H */

@@ -18,6 +18,7 @@ SCR_SELECT = 1
 SCR_GAME = 2
 
 MAX_SNAKES = 6                          # 3 level slots + room for clones
+MAX_SN_DRAW = 64                        # scratch capacity for Bezier snake draw
 CRAWL_MS = 200          # 0.2 s per cell, the original moveSpeed=5
 WIN_HOLD_MS = 2000      # congrats hold, the original endAnimDur=2
 GROW_MS = 1000          # tail growth, the original growSpeed=1
@@ -202,6 +203,7 @@ class Game:
         self.s5 = Snake()
         self.nsnakes = 0
         self.active = 0
+        self.activems = 0                   # when active last changed (pulse phase)
         self.pushmask = 0                   # snakes currently in a push chain
         # turn-start propel-zone bitmasks (bit = index among type-1 zones).
         # Coast only when an entity overlaps a zone it did not already cover
@@ -245,6 +247,36 @@ class Game:
         # and baked (engine.bake); frames in between just restore the bake
         # and draw the animated entities on top.
         self.dirty = 1
+
+        # Reusable snake-draw scratch (bump-arena has no free: never alloc
+        # fresh list[int]s per frame).
+        self.sn_cx: "list[int]" = []
+        self.sn_cy: "list[int]" = []
+        self.sn_cz: "list[int]" = []
+        self.sn_tinx: "list[int]" = []
+        self.sn_tiny: "list[int]" = []
+        self.sn_toux: "list[int]" = []
+        self.sn_touy: "list[int]" = []
+        self.sn_corner: "list[int]" = []
+        i = 0
+        while i < MAX_SN_DRAW:
+            self.sn_cx.append(0)
+            self.sn_cy.append(0)
+            self.sn_cz.append(0)
+            self.sn_tinx.append(0)
+            self.sn_tiny.append(0)
+            self.sn_toux.append(0)
+            self.sn_touy.append(0)
+            self.sn_corner.append(0)
+            i = i + 1
+
+        # HUD / select labels cached so draw never calls str() per frame
+        self.level_label: "char*" = "LEVEL 1"
+        self.hud_hint: "char*" = \
+            "Z UNDO   X REDO   R RESET   G GRID   ESC MENU"
+        self.hud_hint_tab: "char*" = \
+            "Z UNDO   X REDO   R RESET   TAB SWITCH   G GRID   ESC MENU"
+        self.lvlnum: "list" = []
 
     # ------------------------------------------------------------- helpers
 
@@ -383,6 +415,7 @@ class Game:
         while i < self.nlevels:
             self.won.append(0)
             self.stashed.append(0)
+            self.lvlnum.append(str(i + 1))
             d = levels.level_data(i)
             if d.find("\n* ") >= 0:
                 self.hasstar.append(1)
@@ -393,6 +426,7 @@ class Game:
     def load_level(self, idx: int) -> None:
         self.levelidx = idx
         self.dirty = 1
+        self.level_label = "LEVEL " + str(idx + 1)
         d = levels.level_data(idx)
         lines = d.split("\n")
         nlines = len(lines)
@@ -514,6 +548,7 @@ class Game:
         self.s5 = Snake()
         self.nsnakes = 0
         self.active = 0
+        self.activems = engine.ms()
         self.turn = 0
         self.lastdx = 0
         self.lastdy = 0
@@ -666,7 +701,7 @@ class Game:
             self.pairlock.append(0)
             i = i + 1
 
-        # screen geometry: fit the original camera view into 1920x1080
+        # screen geometry: fit the camera view into the window
         sw = engine.width()
         sh = engine.height()
         cw = sw // self.vw
@@ -872,7 +907,7 @@ class Game:
         k = 0
         self.turn = d[k]
         k = k + 1
-        self.active = d[k]
+        self.set_active(d[k])
         k = k + 1
         n = self.gw * self.gh
         i = 0
@@ -982,7 +1017,7 @@ class Game:
             i = i + 1
         self.nsnakes = ns
         if self.active >= ns:
-            self.active = 0
+            self.set_active(0)
         self.bombq = []                     # never carry a mid-move queue across undo/load
 
     # undo/redo entries are [corelen, core..., chklen, chk...] appended to a
@@ -2193,6 +2228,12 @@ class Game:
                     _log("[game] star collected")
             i = i + 1
 
+    def set_active(self, c: int) -> None:
+        """Select snake c and restart its brightness pulse at darkest."""
+        if c != self.active:
+            self.active = c
+            self.activems = engine.ms()
+
     def auto_switch(self) -> None:
         i = 1
         while i <= self.nsnakes:
@@ -2203,7 +2244,7 @@ class Game:
             if s.gone == 0:
                 if s.alive == 1:
                     if s.swarmed == 0:
-                        self.active = c
+                        self.set_active(c)
                         return
             i = i + 1
 
@@ -2329,7 +2370,7 @@ class Game:
                 if s.alive == 1:
                     if s.swarmed == 0:
                         if c != self.active:
-                            self.active = c
+                            self.set_active(c)
                             _log("[game] switched snake")
                         return
             i = i + 1
@@ -2403,6 +2444,21 @@ class Game:
     def cell_py(self, cy: int) -> int:
         return self.oy - cy * self.cell
 
+    def u(self, v: int) -> int:
+        """Scale a layout value authored for 1920-wide to the window."""
+        return v * engine.width() // 1920
+
+    def uy(self, v: int) -> int:
+        """Scale a layout value authored for 1080-tall to the window."""
+        return v * engine.height() // 1080
+
+    def ut(self, s: int) -> int:
+        """Bitmap text scale authored for 1920-wide (at least 1)."""
+        sc = s * engine.width() // 1920
+        if sc < 1:
+            return 1
+        return sc
+
     def cspr(self, sid: int, px: int, py: int, wf: int, hf: int) -> None:
         """Draw a sprite centred in the cell at (px, py), sized wf x hf in
         1/256ths of a cell. Unity sizes each plain SpriteRenderer as
@@ -2445,7 +2501,10 @@ class Game:
         while seg <= n:
             lx = x0 + dx * seg // n
             ly = y0 + dy * seg // n
-            engine.rect_a(lx - 3, ly - 3, 6, 6, rgb, alpha)
+            d = self.u(6)
+            if d < 2:
+                d = 2
+            engine.rect_a(lx - d // 2, ly - d // 2, d, d, rgb, alpha)
             seg = seg + 1
 
     def draw_connectable_line(self, zx: int, zy: int, bi: int,
@@ -2548,15 +2607,19 @@ class Game:
             self.cspr_ex(sid, px, py, 298, 298, self.padcol[i], 256, 0)
             i = i + 1
         # grid overlay last in the static bake so it sits on walls/pads
-        # (the original Show Grid setting, default on)
+        # (the original Show Grid setting, default on). Offset by half a
+        # cell so lines cross cell centres rather than edges.
         if self.gridon == 1:
+            half = cell // 2
             gx = 0
-            while gx <= self.vw:
-                engine.rect_a(vx0 + gx * cell, vy0, 1, vhpx, 16777215, 40)
+            while gx < self.vw:
+                engine.rect_a(vx0 + gx * cell + half, vy0, 1, vhpx,
+                              16777215, 40)
                 gx = gx + 1
             gy = 0
-            while gy <= self.vh:
-                engine.rect_a(vx0, vy0 + gy * cell, vwpx, 1, 16777215, 40)
+            while gy < self.vh:
+                engine.rect_a(vx0, vy0 + gy * cell + half, vwpx, 1,
+                              16777215, 40)
                 gy = gy + 1
 
     def draw_board_dynamic(self, tms: int) -> None:
@@ -2684,66 +2747,184 @@ class Game:
             i = i + 1
         self.draw_hud()
 
+    def _isqrt(self, n: int) -> int:
+        """Integer square root (Newton), for Bezier corner tangents."""
+        if n <= 0:
+            return 0
+        x = n
+        y = (x + 1) // 2
+        while y < x:
+            x = y
+            y = (x + n // x) // 2
+        return x
+
     def draw_snake(self, si: int, tms: int) -> None:
         s = self.snake(si)
         if s.gone == 1:
             return
-        cell = self.cell
+        # self.cell is an obj-typed field; cell_px returns a plain int.
+        cell = self.cell_px(1) - self.cell_px(0)
         n = s.npart()
         col = s.colr * 65536 + s.colg * 256 + s.colb
-        if s.alive == 0:
-            col = (s.colr // 2) * 65536 + (s.colg // 2) * 256 + s.colb // 2
-        elif si == self.active:
-            hr = s.colr + (255 - s.colr) // 4
-            hg = s.colg + (255 - s.colg) // 4
-            hb = s.colb + (255 - s.colb) // 4
-            col = hr * 65536 + hg * 256 + hb
+        # Active snake pulses darkest → lightest → darkest, restarting at
+        # darkest whenever it becomes active. Lightest is slightly below base.
+        if s.alive == 1:
+            if si == self.active:
+                period = 1400
+                age = tms - self.activems
+                if age < 0:
+                    age = 0
+                t = age % period
+                half = period // 2
+                # t=0 / period: darkest (512); t=half: lightest (0)
+                if t < half:
+                    lvl = 512 - t * 512 // half
+                else:
+                    lvl = (t - half) * 512 // half
+                # factor 256ths: lightest = 80% of inactive (204), mid 185, dark 155
+                if lvl <= 256:
+                    fac = 204 - 19 * lvl // 256
+                else:
+                    fac = 185 - 30 * (lvl - 256) // 256
+                hr = s.colr * fac // 256
+                hg = s.colg * fac // 256
+                hb = s.colb * fac // 256
+                col = hr * 65536 + hg * 256 + hb
         inset = cell // 12
-        rad = (cell * 38) // 100
-        # bridges along the seams between consecutive parts: a few plain
-        # rects between the two cell positions, so the caps keep their
-        # rounded outer corners and corner turns fill in smoothly
-        j = 1
+        br = (cell - 2 * inset) // 4       # half prior thickness
+        if br < 2:
+            br = 2
+        ox = self.cell_px(0) - 0           # force int screen origin
+        oy = self.cell_py(0)
+        # Pixel centres of surface / shallow-pit parts. Deep-gone parts are
+        # skipped so blast fragments do not drag a curve into the void.
+        # Write into preallocated sn_* scratch — no per-frame list allocs.
+        m = 0
+        j = 0
         while j < n:
-            if s.zs[j] <= s.zs[j - 1]:
-                ax = self.ox + (s.vx[j - 1] * cell) // 256
-                ay = self.oy - (s.vy[j - 1] * cell) // 256
-                bx = self.ox + (s.vx[j] * cell) // 256
-                by = self.oy - (s.vy[j] * cell) // 256
-                k = 1
-                while k < 4:
-                    mx = ax + (bx - ax) * k // 4
-                    my = ay + (by - ay) * k // 4
-                    engine.rect(mx + inset, my + inset, cell - 2 * inset,
-                                cell - 2 * inset, col)
-                    k = k + 1
-            j = j + 1
-        # the parts themselves; head and tail get fully rounded caps
-        j = n - 1
-        while j >= 0:
-            px = self.ox + (s.vx[j] * cell) // 256
-            py = self.oy - (s.vy[j] * cell) // 256
-            corners = 0
-            if j == 0:
-                corners = 15
-            if j == n - 1:
-                corners = 15
             if s.zs[j] < 2:
+                if m < MAX_SN_DRAW:
+                    self.sn_cx[m] = ox + (s.vx[j] * cell) // 256 + cell // 2
+                    self.sn_cy[m] = oy - (s.vy[j] * cell) // 256 + cell // 2
+                    self.sn_cz[m] = s.zs[j]
+                    m = m + 1
+            j = j + 1
+        if m == 0:
+            return
+        if m == 1:
+            dark = col
+            if self.sn_cz[0] == 1:
+                dark = (s.colr // 3) * 65536 + (s.colg // 3) * 256 + \
+                    s.colb // 3
+            engine.circle(self.sn_cx[0], self.sn_cy[0], br, dark)
+        else:
+            # Tangents match Snake.BuildGridKnot: straight arms use 1/2 the
+            # neighbour delta; 90° corners use Unity's
+            # (4/3)·tan(π/8) ≈ 0.552 handle along the chord (prev→next).
+            k = 0
+            while k < m:
+                self.sn_tinx[k] = 0
+                self.sn_tiny[k] = 0
+                self.sn_toux[k] = 0
+                self.sn_touy[k] = 0
+                is_c = 0
+                if k > 0:
+                    if k < m - 1:
+                        dpx = self.sn_cx[k - 1] - self.sn_cx[k]
+                        dpy = self.sn_cy[k - 1] - self.sn_cy[k]
+                        dnx = self.sn_cx[k + 1] - self.sn_cx[k]
+                        dny = self.sn_cy[k + 1] - self.sn_cy[k]
+                        if dpx + dnx != 0:
+                            is_c = 1
+                        elif dpy + dny != 0:
+                            is_c = 1
+                self.sn_corner[k] = is_c
+                k = k + 1
+            # KnotCornerTangentScale in 1/256ths of a cell
+            cscale = 141
+            k = 0
+            while k < m:
+                if self.sn_corner[k] == 1:
+                    cdx = self.sn_cx[k + 1] - self.sn_cx[k - 1]
+                    cdy = self.sn_cy[k + 1] - self.sn_cy[k - 1]
+                    L = self._isqrt(cdx * cdx + cdy * cdy)
+                    if L > 0:
+                        hl = cell * cscale // 256
+                        self.sn_tinx[k] = (0 - cdx) * hl // L
+                        self.sn_tiny[k] = (0 - cdy) * hl // L
+                        self.sn_toux[k] = cdx * hl // L
+                        self.sn_touy[k] = cdy * hl // L
+                else:
+                    if k > 0:
+                        sc = 128
+                        if self.sn_corner[k - 1] == 1:
+                            sc = cscale
+                        if k < m - 1:
+                            if self.sn_corner[k + 1] == 1:
+                                sc = cscale
+                        self.sn_tinx[k] = (self.sn_cx[k - 1] - self.sn_cx[k]) \
+                            * sc // 256
+                        self.sn_tiny[k] = (self.sn_cy[k - 1] - self.sn_cy[k]) \
+                            * sc // 256
+                    if k < m - 1:
+                        sc = 128
+                        if self.sn_corner[k + 1] == 1:
+                            sc = cscale
+                        if k > 0:
+                            if self.sn_corner[k - 1] == 1:
+                                sc = cscale
+                        self.sn_toux[k] = (self.sn_cx[k + 1] - self.sn_cx[k]) \
+                            * sc // 256
+                        self.sn_touy[k] = (self.sn_cy[k + 1] - self.sn_cy[k]) \
+                            * sc // 256
+                k = k + 1
+            # Stroke each cubic Bezier segment with overlapping circles.
+            samples = cell // 4
+            if samples < 8:
+                samples = 8
+            k = 0
+            while k < m - 1:
+                p0x = self.sn_cx[k]
+                p0y = self.sn_cy[k]
+                p1x = self.sn_cx[k] + self.sn_toux[k]
+                p1y = self.sn_cy[k] + self.sn_touy[k]
+                p2x = self.sn_cx[k + 1] + self.sn_tinx[k + 1]
+                p2y = self.sn_cy[k + 1] + self.sn_tiny[k + 1]
+                p3x = self.sn_cx[k + 1]
+                p3y = self.sn_cy[k + 1]
                 dark = col
-                if s.zs[j] == 1:
+                if self.sn_cz[k] == 1:
                     dark = (s.colr // 3) * 65536 + (s.colg // 3) * 256 + \
                         s.colb // 3
-                engine.round_rect(px + inset, py + inset, cell - 2 * inset,
-                                  cell - 2 * inset, rad, corners, dark)
-            j = j - 1
+                elif self.sn_cz[k + 1] == 1:
+                    dark = (s.colr // 3) * 65536 + (s.colg // 3) * 256 + \
+                        s.colb // 3
+                t = 0
+                while t <= samples:
+                    # de Casteljau in integer t/samples
+                    ax = p0x + (p1x - p0x) * t // samples
+                    ay = p0y + (p1y - p0y) * t // samples
+                    bx = p1x + (p2x - p1x) * t // samples
+                    by = p1y + (p2y - p1y) * t // samples
+                    ux = p2x + (p3x - p2x) * t // samples
+                    uy = p2y + (p3y - p2y) * t // samples
+                    dx0 = ax + (bx - ax) * t // samples
+                    dy0 = ay + (by - ay) * t // samples
+                    ex = bx + (ux - bx) * t // samples
+                    ey = by + (uy - by) * t // samples
+                    px = dx0 + (ex - dx0) * t // samples
+                    py = dy0 + (ey - dy0) * t // samples
+                    engine.circle(px, py, br, dark)
+                    t = t + 1
+                k = k + 1
         # face (only while the original head part survives: headless
         # corpses and fragments from a bomb blast show no eyes)
         if n > 0:
             if s.zs[0] < 2:
                 if s.hashead == 0:
                     return
-                hx = self.ox + (s.vx[0] * cell) // 256
-                hy = self.oy - (s.vy[0] * cell) // 256
+                hx = ox + (s.vx[0] * cell) // 256
+                hy = oy - (s.vy[0] * cell) // 256
                 rot = 0
                 if s.fdx == 1:
                     rot = 3
@@ -2752,17 +2933,24 @@ class Game:
                 elif s.fdy == -1:
                     rot = 2
                 if s.alive == 0:
-                    engine.sprite_ex(engine.SPR_DEADEYES, hx + cell // 8,
-                                     hy + cell // 8, cell * 3 // 4,
-                                     cell * 3 // 4, 16777215, 256, rot)
+                    ds = br * 8 // 5            # ~0.8 × prior 2*br
+                    if ds < 8:
+                        ds = 8
+                    engine.sprite_ex(engine.SPR_DEADEYES,
+                                     hx + cell // 2 - ds // 2,
+                                     hy + cell // 2 - ds // 2,
+                                     ds, ds, 16777215, 256, rot)
                 else:
-                    # googly eyes: white balls astride the facing axis,
-                    # pupils wandering (re-aim ~1 s), blinking every ~4 s
-                    ecx = hx + cell // 2 + s.fdx * cell // 6
-                    ecy = hy + cell // 2 - s.fdy * cell // 6
-                    exo = s.fdy * cell // 5      # perpendicular offset
-                    eyo = s.fdx * cell // 5
-                    er = cell // 6
+                    # Eyes sized to the thin head disk (radius br)
+                    er = br * 2 // 5            # 20% smaller than br//2
+                    if er < 2:
+                        er = 2
+                    fwd = br // 3
+                    sep = br * 2 // 5
+                    ecx = hx + cell // 2 + s.fdx * fwd
+                    ecy = hy + cell // 2 - s.fdy * fwd
+                    exo = s.fdy * sep
+                    eyo = s.fdx * sep
                     wob = (tms // 900 + si * 3) % 8
                     wx = (wob % 3) - 1
                     wy = (wob // 3) - 1
@@ -2790,12 +2978,12 @@ class Game:
 
     def draw_hud(self) -> None:
         sh = engine.height()
-        engine.text(24, 16, "LEVEL " + str(self.levelidx + 1), 16777215, 3)
-        hint: "char*" = "Z UNDO   X REDO   R RESET"
+        engine.text(self.u(24), self.uy(16), self.level_label, 16777215,
+                    self.ut(3))
+        hint: "char*" = self.hud_hint
         if self.nsnakes > 1:
-            hint = hint + "   TAB SWITCH"
-        hint = hint + "   G GRID   ESC MENU"
-        engine.text(24, sh - 40, hint, 11184810, 2)
+            hint = self.hud_hint_tab
+        engine.text(self.u(24), sh - self.uy(40), hint, 11184810, self.ut(2))
 
     def draw_win(self, tms: int) -> None:
         sw = engine.width()
@@ -2819,7 +3007,7 @@ class Game:
                 colr = 4521796
             if c == 2:
                 colr = 16773188
-            engine.rect(fx, fy, 10, 16, colr)
+            engine.rect(fx, fy, self.u(10), self.uy(16), colr)
             i = i + 1
 
     # ------------------------------------------------------------ animation
@@ -2877,17 +3065,21 @@ class Game:
         engine.sprite(engine.SPR_TITLE, (sw - tw) // 2, sh // 8, tw, th)
         if (tms // 500) % 2 == 0:
             engine.text_centered(sw // 2, sh * 2 // 3,
-                                 "PRESS ENTER", 16777215, 4)
-        engine.text_centered(sw // 2, sh - 60,
+                                 "PRESS ENTER", 16777215, self.ut(4))
+        engine.text_centered(sw // 2, sh - self.uy(60),
                              "A BAREMETAL RPYTHON DEMAKE OF SNAKE-GAME",
-                             9474192, 2)
+                             9474192, self.ut(2))
         # a little snake swimming along the bottom
         t = tms // 16
+        bs = self.u(36)
+        if bs < 4:
+            bs = 4
         i = 0
         while i < 6:
-            px = (t + 640 - i * 40) % (sw + 400) - 200
-            py = sh * 4 // 5 + 0
-            engine.round_rect(px, py, 36, 36, 14, 15, 65280)
+            px = (t + self.u(640) - i * self.u(40)) % (sw + self.u(400)) - \
+                self.u(200)
+            py = sh * 4 // 5
+            engine.round_rect(px, py, bs, bs, bs // 2, 15, 65280)
             i = i + 1
 
     def draw_select(self, tms: int) -> None:
@@ -2895,13 +3087,14 @@ class Game:
         sh = engine.height()
         engine.clear(0)
         engine.sprite(engine.SPR_BACKGROUND, 0, 0, sw, sh)
-        engine.text_centered(sw // 2, 30, "SELECT LEVEL", 16777215, 5)
+        engine.text_centered(sw // 2, self.uy(30), "SELECT LEVEL",
+                             16777215, self.ut(5))
         cols = 8
-        bw = 108
-        gap = 30
+        bw = self.u(108)
+        gap = self.u(30)
         rows = (self.nlevels + cols - 1) // cols
         x0 = (sw - cols * bw - (cols - 1) * gap) // 2
-        y0 = 140
+        y0 = self.uy(140)
         i = 0
         while i < self.nlevels:
             r = i // cols
@@ -2913,29 +3106,35 @@ class Game:
                 sid = engine.SPR_LVLWON
             grow = 0
             if i == self.cursor:
-                grow = 10
+                grow = self.u(10)
             engine.sprite(sid, bx - grow, by - grow, bw + 2 * grow,
                           bw + 2 * grow)
             if i == self.cursor:
-                engine.round_rect(bx - grow - 6, by - grow - 6, 3,
-                                  bw + 2 * grow + 12, 1, 0, 16777215)
-                engine.round_rect(bx + bw + grow + 3, by - grow - 6, 3,
-                                  bw + 2 * grow + 12, 1, 0, 16777215)
-                engine.round_rect(bx - grow - 6, by - grow - 6,
-                                  bw + 2 * grow + 12, 3, 1, 0, 16777215)
-                engine.round_rect(bx - grow - 6, by + bw + grow + 3,
-                                  bw + 2 * grow + 12, 3, 1, 0, 16777215)
-            engine.text_centered(bx + bw // 2, by + bw // 2 - 16,
-                                 str(i + 1), 2236962, 3)
+                pad = self.u(6)
+                thk = self.u(3)
+                if thk < 1:
+                    thk = 1
+                engine.round_rect(bx - grow - pad, by - grow - pad, thk,
+                                  bw + 2 * grow + 2 * pad, 1, 0, 16777215)
+                engine.round_rect(bx + bw + grow + thk // 2, by - grow - pad,
+                                  thk, bw + 2 * grow + 2 * pad, 1, 0, 16777215)
+                engine.round_rect(bx - grow - pad, by - grow - pad,
+                                  bw + 2 * grow + 2 * pad, thk, 1, 0, 16777215)
+                engine.round_rect(bx - grow - pad, by + bw + grow + thk // 2,
+                                  bw + 2 * grow + 2 * pad, thk, 1, 0, 16777215)
+            engine.text_centered(bx + bw // 2, by + bw // 2 - self.uy(16),
+                                 self.lvlnum[i], 2236962, self.ut(3))
             if self.hasstar[i] == 1:
                 ssid = engine.SPR_STAROFF
                 if self.stashed[i] == 1:
                     ssid = engine.SPR_STARON
-                engine.sprite(ssid, bx + bw - 34, by + bw - 34, 30, 30)
+                ss = self.u(30)
+                engine.sprite(ssid, bx + bw - self.u(34), by + bw - self.u(34),
+                              ss, ss)
             i = i + 1
-        engine.text_centered(sw // 2, sh - 50,
+        engine.text_centered(sw // 2, sh - self.uy(50),
                              "ARROWS MOVE   ENTER PLAY   ESC BACK",
-                             9474192, 2)
+                             9474192, self.ut(2))
 
     # --------------------------------------------------------------- loop
 

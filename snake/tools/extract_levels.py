@@ -425,7 +425,7 @@ SPRITES = [
     ("APPLE",     "Apple.png",           None, 96),
     ("STAR",      "Star.png",            None, 96),
     ("PORTAL",    "Portal.png",          None, 96),
-    ("SAVE",      "Save Icon.png",       (1.0, 1.0, 1.0, 0.502), 96),
+    ("SAVE",      "Save Icon.png",       (0.0, 0.0, 1.0, 0.502), 96),
     ("LOAD",      "Load Icon.png",       (1.0, 0.502, 0.0, 0.502), 96),
     ("PROPEL",    "Propel Zone.png",     (1.0, 0.502, 1.0, 0.502), 96),
     ("PAD",       "Weightpad.png",       None, 96),

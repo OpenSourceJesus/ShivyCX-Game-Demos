@@ -24,7 +24,7 @@
 
 /* ---- arena (sized for a 1 MiB-loaded kernel; the runtime's default 1 GiB
  *      static arena would never fit, so we shadow malloc instead) ---------- */
-#define RT_ARENA_BYTES (2 * 1024 * 1024)
+#define RT_ARENA_BYTES (16 * 1024 * 1024)
 static u8  g_rt_arena[RT_ARENA_BYTES] __attribute__((aligned(16)));
 static u32 g_rt_used;
 

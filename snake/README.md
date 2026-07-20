@@ -5,8 +5,9 @@ Sokoban-snake: one cell per key press, push chains, pits, portals, ice,
 bombs, weightpads, trapdoors, save/load zones, bug swarms, multiple snakes,
 full undo/redo/reset) -- rebuilt as a **freestanding x86-64 kernel** whose
 game logic is written in **rpython** and translated to C by ShivyC's
-`tools/py2c.py`, rendered through the mbos **high-resolution Bochs-VBE
-framebuffer** (1920x1080x32) from `~/ShivyC/examples/rpython2c/mbos`.
+`tools/py2c.py`, rendered through the mbos **Bochs-VBE framebuffer**
+(default `GFX_DIV=3` → 640x360x32; `make run GFX_DIV=1` rebuilds for 1920x1080)
+from `~/ShivyC/examples/rpython2c/mbos`.
 
 No OS, no libc, no GPU driver beyond 4 PCI config writes: QEMU loads the ELF
 via the Multiboot AOUT kludge, `boot64.S` maps 4 GiB and enters long mode,
@@ -14,7 +15,7 @@ and the game loop polls the PS/2 controller and the PIT.
 
 ```
 make            # py2c-transpile rpy/*.py -> gen/*.c, build build/snake.elf
-make run        # play it: QEMU window, 1920x1080
+make run        # play it: QEMU window (640x360 by default)
 make serial     # headless, game log on stdout
 make test       # scripted playthrough of level 1 (sendkey) + screenshots
 make soak       # loads and pokes all 43 levels
