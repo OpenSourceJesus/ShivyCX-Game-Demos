@@ -2370,7 +2370,8 @@ class Game:
                                 moved = 1
                                 self.resolve_portals()
                                 self.flush_bombs()
-                                self.check_pits()
+                                # Pit death waits until propel for this snake
+                                # stops (force check after resolve_slides).
                         else:
                             coasts[si] = 0
                 order = order + 1
@@ -2438,26 +2439,42 @@ class Game:
 
     # ------------------------------------------------------------- pits etc.
 
-    def check_pits(self) -> None:
-        """A snake falls when EVERY surface part is over an unfilled pit."""
+    def check_pits(self, force: int) -> None:
+        """A snake falls when EVERY surface part is over an unfilled pit.
+
+        force=0: skip snakes still riding propel ice (mid Move/ResolveSlides).
+        force=1: propel finished / end of turn — die even if still on ice
+        (Unity KillAllSnakesFullyOverShallowPits / FillAllSnakesOverPitsAfterTurn).
+        """
         si = 0
         while si < self.nsnakes:
             s = self.snake(si)
             if s.gone == 0:
                 if s.alive == 1:
-                    n = s.npart()
-                    over = 0
-                    j = 0
-                    while j < n:
-                        if self.pit_open_at(s.xs[j], s.ys[j]) > 0:
-                            over = over + 1
-                        j = j + 1
-                    if n > 0:
-                        if over == n:
-                            self.snake_falls(si)
+                    skip = 0
+                    if force == 0:
+                        if self.snake_on_ice(si) == 1:
+                            skip = 1
+                    if skip == 0:
+                        n = s.npart()
+                        over = 0
+                        j = 0
+                        while j < n:
+                            if self.pit_open_at(s.xs[j], s.ys[j]) > 0:
+                                over = over + 1
+                            j = j + 1
+                        if n > 0:
+                            if over == n:
+                                self.snake_falls(si)
             si = si + 1
 
     def snake_falls(self, si: int) -> None:
+        """Kill a snake fully over pits.
+
+        Shallow: corpse stays at surface (alive=0, gone=0) — still drawn with
+        dead eyes/tongue, still pushable. Deep/bottomless: parts sink and the
+        snake is hidden when every part left the surface.
+        """
         s = self.snake(si)
         s.alive = 0
         allgone = 1
@@ -2567,7 +2584,7 @@ class Game:
                 if bb >= 0:
                     self.object_landed(-1, bb)
                 self.flush_bombs()          # Trapdoor.cs flushes on opening
-                self.check_pits()
+                self.check_pits(1)
             i = i + 1
         i = 0
         while i < n:
@@ -2626,7 +2643,7 @@ class Game:
             if self._bufs_equal(2, 0) == 1:
                 self.turn = self.turn - 1
                 return                      # refused, nothing changed
-            self.check_pits()
+            self.check_pits(1)
             self.update_pads()
             self.ser()
             self._hist_push(0, 2, 3)
@@ -2638,8 +2655,11 @@ class Game:
         self.lastdy = dy
         self.resolve_portals()
         self.flush_bombs()                  # end-of-move blasts (pit bombs)
-        self.check_pits()
+        # Mid Move/ResolveSlides: skate over pits while riding propel ice.
+        self.check_pits(0)
         self.resolve_slides(dx, dy)
+        # Propel finished: die even if still on ice (wall-stop over shallow).
+        self.check_pits(1)
         self.resolve_portals()
         self.flush_bombs()
         self.update_pads()
@@ -2667,7 +2687,9 @@ class Game:
                 self.apply_checkpoint()
         self.update_traps_arming()
         self.update_swarms()
-        self.check_pits()
+        # End of turn: every snake fully over pits dies now (Unity
+        # FillAllSnakesOverPitsAfterTurn — not blocked by other snakes).
+        self.check_pits(1)
         self.update_stars()
         self.update_traps_turn_end()
         self.update_pads()
@@ -3128,7 +3150,9 @@ class Game:
                         self.cspr_unload_wash(engine.SPR_BOMB, bpx, bpy,
                                               207, 230)
             i = i + 1
-        # snakes (order 300/302)
+        # snakes (order 300/302) — one shadow stamp for all so overlapping
+        # Bezier discs (and snakes) keep a single soft opacity.
+        engine.shadow_begin()
         si = 0
         while si < self.nsnakes:
             self.draw_snake(si, tms)
@@ -3278,7 +3302,7 @@ class Game:
         if m == 0:
             return
         soff = self.drop_off()
-        # Shadow pass (half-dark gray, offset below-left) then the body.
+        # Shadow pass (black @ 50% alpha, like box/bomb cspr_drop) then body.
         passn = 0
         while passn < 2:
             dxo = 0
@@ -3287,14 +3311,16 @@ class Game:
                 dxo = 0 - soff
                 dyo = soff
             if m == 1:
-                dark = 4210752              # 0x404040 — .5× darker than mid-gray
-                if passn == 1:
+                if passn == 0:
+                    engine.circle_shadow(self.sn_cx[0] + dxo,
+                                         self.sn_cy[0] + dyo, br, 128)
+                else:
                     dark = col
                     if self.sn_cz[0] == 1:
                         dark = (s.colr // 3) * 65536 + (s.colg // 3) * 256 + \
                             s.colb // 3
-                engine.circle(self.sn_cx[0] + dxo, self.sn_cy[0] + dyo, br,
-                              dark)
+                    engine.circle(self.sn_cx[0] + dxo, self.sn_cy[0] + dyo, br,
+                                  dark)
             else:
                 if passn == 0:
                     # Tangents match Snake.BuildGridKnot: straight arms use
@@ -3371,9 +3397,8 @@ class Game:
                     p2y = self.sn_cy[k + 1] + self.sn_tiny[k + 1] + dyo
                     p3x = self.sn_cx[k + 1] + dxo
                     p3y = self.sn_cy[k + 1] + dyo
-                    dark = 4210752          # .5× darker than mid-gray shadow
+                    dark = col
                     if passn == 1:
-                        dark = col
                         if self.sn_cz[k] == 1:
                             dark = (s.colr // 3) * 65536 + \
                                 (s.colg // 3) * 256 + s.colb // 3
@@ -3395,7 +3420,10 @@ class Game:
                         ey = by + (uy - by) * t // samples
                         px = dx0 + (ex - dx0) * t // samples
                         py = dy0 + (ey - dy0) * t // samples
-                        engine.circle(px, py, br, dark)
+                        if passn == 0:
+                            engine.circle_shadow(px, py, br, 128)
+                        else:
+                            engine.circle(px, py, br, dark)
                         t = t + 1
                     k = k + 1
             passn = passn + 1

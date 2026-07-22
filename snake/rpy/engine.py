@@ -29,6 +29,11 @@ _g.sg_circle.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int,
 _g.sg_circle_a.restype = None
 _g.sg_circle_a.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int,
                            ctypes.c_int, ctypes.c_int]
+_g.sg_shadow_begin.restype = None
+_g.sg_shadow_begin.argtypes = []
+_g.sg_circle_shadow.restype = None
+_g.sg_circle_shadow.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                ctypes.c_int]
 _g.sg_round_rect.restype = None
 _g.sg_round_rect.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int,
                              ctypes.c_int, ctypes.c_int, ctypes.c_int,
@@ -126,6 +131,14 @@ def circle(cx: int, cy: int, r: int, rgb: int) -> None:
 
 def circle_a(cx: int, cy: int, r: int, rgb: int, alpha: int) -> None:
     _g.sg_circle_a(cx, cy, r, rgb, alpha)
+
+
+def shadow_begin() -> None:
+    _g.sg_shadow_begin()
+
+
+def circle_shadow(cx: int, cy: int, r: int, alpha: int) -> None:
+    _g.sg_circle_shadow(cx, cy, r, alpha)
 
 
 def round_rect(x: int, y: int, w: int, h: int, r: int, corners: int,

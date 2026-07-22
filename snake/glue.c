@@ -23,6 +23,11 @@ static u32 g_back[MBOS_GFX_W * (u32)MBOS_GFX_H] __attribute__((aligned(16)));
  * from ~4M blended pixels to two bulk copies plus a few sprites. */
 static u32 g_scene[MBOS_GFX_W * (u32)MBOS_GFX_H] __attribute__((aligned(16)));
 
+/* Coverage stamp for soft drop shadows: overlapping circle stamps must not
+ * stack alpha (snake Bezier strokes use many overlapping discs). */
+static u8 g_shadow_stamp[MBOS_GFX_W * (u32)MBOS_GFX_H];
+static u8 g_shadow_gen;
+
 static void copy_frame(u32 *dst, const u32 *src) {
     u64 *d = (u64 *)dst;
     const u64 *s = (const u64 *)src;
@@ -114,6 +119,45 @@ void sg_circle_a(int cx, int cy, int r, int rgb, int alpha) {
             g_back[py * W + px] = ((((sr + dr) >> 8) & 0xFF) << 16) |
                                   ((((sg + dg) >> 8) & 0xFF) << 8) |
                                   (((sb + db) >> 8) & 0xFF);
+        }
+    }
+}
+
+/* Start a soft-shadow stamp generation. Each pixel blends at most once until
+ * the next begin (so overlapping shadow discs keep constant opacity). */
+void sg_shadow_begin(void) {
+    u8 g = (u8)(g_shadow_gen + 1u);
+    if (g == 0) {
+        u32 n = gfx_width() * gfx_height(), i;
+        for (i = 0; i < n; i++) g_shadow_stamp[i] = 0;
+        g = 1;
+    }
+    g_shadow_gen = g;
+}
+
+/* Black drop-shadow disc; skips pixels already stamped this generation. */
+void sg_circle_shadow(int cx, int cy, int r, int alpha) {
+    int W = (int)gfx_width(), H = (int)gfx_height();
+    int x, y, r2 = r * r;
+    u32 a = (u32)alpha, na = 256u - a;
+    u8 gen = g_shadow_gen;
+    if (gen == 0) return;
+    for (y = -r; y <= r; y++) {
+        int py = cy + y;
+        if (py < 0 || py >= H) continue;
+        for (x = -r; x <= r; x++) {
+            int px = cx + x;
+            u32 idx, dst, dr, dg, db;
+            if (px < 0 || px >= W) continue;
+            if (x * x + y * y > r2) continue;
+            idx = (u32)py * (u32)W + (u32)px;
+            if (g_shadow_stamp[idx] == gen) continue;
+            g_shadow_stamp[idx] = gen;
+            dst = g_back[idx];
+            dr = ((dst >> 16) & 0xFF) * na;
+            dg = ((dst >> 8) & 0xFF) * na;
+            db = (dst & 0xFF) * na;
+            g_back[idx] = ((dr >> 8) << 16) | ((dg >> 8) << 8) | (db >> 8);
         }
     }
 }
