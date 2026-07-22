@@ -166,6 +166,8 @@ static inline u32 mul255(u32 x, u32 a) {
 /* Scaled, alpha-blended, optionally tinted + quarter-rotated sprite blit.
  * tint is 0xRRGGBB multiplied into the texel (0xFFFFFF = untinted); alpha
  * 0..256 scales the texel's own alpha; rot counts 90-degree CCW turns.
+ * If the top byte of tint is 0x01, the low 24 bits are a solid RGB and the
+ * sprite only contributes alpha (used to wash unloadables toward white).
  *
  * The rot==0 case (everything except portals/eyes) walks the sprite with
  * fixed-point row/column stepping instead of two divides per pixel, and
@@ -178,10 +180,12 @@ void sg_sprite(int id, int x, int y, int w, int h, int tint, int alpha,
     int i, j;
     u32 tr, tg, tb;
     int tinted;
+    int solid;
     if (id < 0 || id >= SPRITE_COUNT || w <= 0 || h <= 0) return;
     sp = &SPRITES[id];
+    solid = (((u32)tint >> 24) & 0xFF) == 1u;
     tr = ((u32)tint >> 16) & 0xFF; tg = ((u32)tint >> 8) & 0xFF; tb = (u32)tint & 0xFF;
-    tinted = (u32)tint != 0xFFFFFFu;
+    tinted = !solid && (u32)tint != 0xFFFFFFu;
 
     if ((rot & 3) == 0) {
         int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
@@ -200,8 +204,12 @@ void sg_sprite(int id, int x, int y, int w, int h, int tint, int alpha,
                 u32 r, g, b, dst;
                 if (alpha != 256) a = (a * (u32)alpha) >> 8;
                 if (a == 0) continue;
-                r = (texel >> 16) & 0xFF; g = (texel >> 8) & 0xFF; b = texel & 0xFF;
-                if (tinted) { r = mul255(r, tr); g = mul255(g, tg); b = mul255(b, tb); }
+                if (solid) {
+                    r = tr; g = tg; b = tb;
+                } else {
+                    r = (texel >> 16) & 0xFF; g = (texel >> 8) & 0xFF; b = texel & 0xFF;
+                    if (tinted) { r = mul255(r, tr); g = mul255(g, tg); b = mul255(b, tb); }
+                }
                 if (a == 255) { drow[i] = (r << 16) | (g << 8) | b; continue; }
                 dst = drow[i];
                 r = mul255(r, a) + mul255((dst >> 16) & 0xFF, 255 - a);
@@ -239,9 +247,13 @@ void sg_sprite(int id, int x, int y, int w, int h, int tint, int alpha,
             a = (texel >> 24) & 0xFF;
             a = (a * (u32)alpha) >> 8;
             if (a == 0) continue;
-            r = mul255((texel >> 16) & 0xFF, tr);
-            g = mul255((texel >> 8) & 0xFF, tg);
-            b = mul255(texel & 0xFF, tb);
+            if (solid) {
+                r = tr; g = tg; b = tb;
+            } else {
+                r = mul255((texel >> 16) & 0xFF, tr);
+                g = mul255((texel >> 8) & 0xFF, tg);
+                b = mul255(texel & 0xFF, tb);
+            }
             dst = g_back[py * W + px];
             r = mul255(r, a) + mul255((dst >> 16) & 0xFF, 255 - a);
             g = mul255(g, a) + mul255((dst >> 8) & 0xFF, 255 - a);

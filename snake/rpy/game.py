@@ -44,6 +44,11 @@ class Snake:
         self.colb = 0
         self.fdx = 1
         self.fdy = 0
+        # After a portal teleport: crawl visually to the entry cell first
+        # (xs - wdx), then snap to the exit (xs).
+        self.warp = 0
+        self.wdx = 0
+        self.wdy = 0
 
     def npart(self) -> int:
         return len(self.xs)
@@ -103,6 +108,9 @@ class Snake:
         while len(self.vx) > len(self.xs):
             self.vx.pop()
             self.vy.pop()
+        self.warp = 0
+        self.wdx = 0
+        self.wdy = 0
 
 
 # NOTE: whole list values never cross function boundaries in this module --
@@ -158,12 +166,20 @@ class Game:
         self.boxlive: "list[int]" = []
         self.boxvx: "list[int]" = []       # visual pos, 1/256 cell
         self.boxvy: "list[int]" = []
+        self.box_unload: "list[int]" = []  # 1: Unity Unloadable (load-zone trigger)
+        self.box_warp: "list[int]" = []    # portal: crawl to entry before snap
+        self.box_wdx: "list[int]" = []
+        self.box_wdy: "list[int]" = []
 
         self.bombx: "list[int]" = []
         self.bomby: "list[int]" = []
         self.bomblive: "list[int]" = []
         self.bombvx: "list[int]" = []
         self.bombvy: "list[int]" = []
+        self.bomb_unload: "list[int]" = []
+        self.bomb_warp: "list[int]" = []
+        self.bomb_wdx: "list[int]" = []
+        self.bomb_wdy: "list[int]" = []
         # pit-triggered blasts wait for the move to finish (the original
         # queues in Pit/TryPush and flushes at the end of Snake.Move), so
         # the pusher ends up inside the 3x3 blast zone before it fires
@@ -328,6 +344,21 @@ class Game:
         if dj >= 0:
             if self.door_open(dj) == 0:
                 return 1
+        return 0
+
+    def in_wall_or_door(self, x: int, y: int) -> int:
+        """1 if the cell has a wall or a door (open or closed).
+
+        Portals / save / load / propel stay hidden under them; open doors
+        still cover the cell visually.
+        """
+        i = self.idx(x, y)
+        if i < 0:
+            return 1
+        if self.wall[i] > 0:
+            return 1
+        if self.doorat[i] >= 0:
+            return 1
         return 0
 
     def pit_open_at(self, x: int, y: int) -> int:
@@ -519,11 +550,19 @@ class Game:
         self.boxlive = []
         self.boxvx = []
         self.boxvy = []
+        self.box_unload = []
+        self.box_warp = []
+        self.box_wdx = []
+        self.box_wdy = []
         self.bombx = []
         self.bomby = []
         self.bomblive = []
         self.bombvx = []
         self.bombvy = []
+        self.bomb_unload = []
+        self.bomb_warp = []
+        self.bomb_wdx = []
+        self.bomb_wdy = []
         self.bombq = []
         self.porx = []
         self.pory = []
@@ -601,12 +640,26 @@ class Game:
                 self.boxlive.append(1)
                 self.boxvx.append(x * 256)
                 self.boxvy.append(y * 256)
+                u = 0
+                if len(toks) >= 4:
+                    u = int(toks[3])
+                self.box_unload.append(u)
+                self.box_warp.append(0)
+                self.box_wdx.append(0)
+                self.box_wdy.append(0)
             elif op2 == "M":
                 self.bombx.append(x)
                 self.bomby.append(y)
                 self.bomblive.append(1)
                 self.bombvx.append(x * 256)
                 self.bombvy.append(y * 256)
+                u = 0
+                if len(toks) >= 4:
+                    u = int(toks[3])
+                self.bomb_unload.append(u)
+                self.bomb_warp.append(0)
+                self.bomb_wdx.append(0)
+                self.bomb_wdy.append(0)
             elif op2 == "A":
                 self.ax = x
                 self.ay = y
@@ -914,8 +967,176 @@ class Game:
             i = i + 1
 
     def apply_buf(self) -> None:
-        """Restore the dynamic state from applybuf."""
+        """Restore the dynamic state from applybuf (undo / redo / reset)."""
+        self._apply_buf(0)
+
+    def apply_checkpoint(self) -> None:
+        """Restore applybuf as a load-zone checkpoint.
+
+        Mirrors GameManager.LoadCheckpoint(skipUnloadable): Unloadable
+        boxes/bombs keep their live pose; other objects whose checkpoint
+        pose would overlap a live Unloadable (whatIsSolid|whatCanTeleport)
+        also stay live; pits filled by an unrestored filler stay filled.
+        """
+        self._apply_buf(1)
+
+    def _applybuf_box_off(self) -> int:
+        """Index in applybuf where box records begin."""
+        k = 2
+        k = k + self.gw * self.gh * 5
+        k = k + len(self.padx) * 3
+        k = k + len(self.pairlock)
+        k = k + len(self.porocc) * 3
+        k = k + len(self.connx) * 2
+        k = k + len(self.starx)
+        return k
+
+    def _unloadable_at(self, x: int, y: int) -> int:
+        """1 if an Unloadable box/bomb (any depth / alive flag) is on (x,y)."""
+        i = 0
+        while i < len(self.boxx):
+            if i < len(self.box_unload):
+                if self.box_unload[i] == 1:
+                    if self.boxx[i] == x:
+                        if self.boxy[i] == y:
+                            return 1
+            i = i + 1
+        i = 0
+        while i < len(self.bombx):
+            if i < len(self.bomb_unload):
+                if self.bomb_unload[i] == 1:
+                    if self.bombx[i] == x:
+                        if self.bomby[i] == y:
+                            return 1
+            i = i + 1
+        return 0
+
+    def _unloadable_sunk_at(self, x: int, y: int) -> int:
+        """1 if an Unloadable at (x,y) is inactive or sunk (pit fill corpse)."""
+        i = 0
+        while i < len(self.boxx):
+            if i < len(self.box_unload):
+                if self.box_unload[i] == 1:
+                    if self.boxx[i] == x:
+                        if self.boxy[i] == y:
+                            if self.boxlive[i] == 0:
+                                return 1
+                            if self.boxz[i] > 0:
+                                return 1
+            i = i + 1
+        i = 0
+        while i < len(self.bombx):
+            if i < len(self.bomb_unload):
+                if self.bomb_unload[i] == 1:
+                    if self.bombx[i] == x:
+                        if self.bomby[i] == y:
+                            if self.bomblive[i] == 0:
+                                return 1
+            i = i + 1
+        return 0
+
+    def _apply_buf(self, skip_unload: int) -> None:
+        """Restore applybuf. skip_unload=1 is checkpoint-load semantics."""
         d = self.applybuf
+        nbox = len(self.boxx)
+        nbomb = len(self.bombx)
+        ncell = self.gw * self.gh
+        skipb: "list[int]" = []
+        skipm: "list[int]" = []
+        skips: "list[int]" = []
+        live_filled: "list[int]" = []
+        live_fillsbox: "list[int]" = []
+        live_wall: "list[int]" = []
+        live_connx: "list[int]" = []
+        live_conny: "list[int]" = []
+        live_porx: "list[int]" = []
+        live_pory: "list[int]" = []
+        i = 0
+        while i < nbox:
+            skipb.append(0)
+            i = i + 1
+        i = 0
+        while i < nbomb:
+            skipm.append(0)
+            i = i + 1
+        i = 0
+        while i < ncell:
+            live_filled.append(self.filled[i])
+            live_fillsbox.append(self.fillsbox[i])
+            live_wall.append(self.wall[i])
+            i = i + 1
+        i = 0
+        while i < len(self.connx):
+            live_connx.append(self.connx[i])
+            live_conny.append(self.conny[i])
+            i = i + 1
+        i = 0
+        while i < len(self.porx):
+            live_porx.append(self.porx[i])
+            live_pory.append(self.pory[i])
+            i = i + 1
+        old_ns = self.nsnakes
+        si = 0
+        while si < old_ns:
+            skips.append(0)
+            si = si + 1
+
+        if skip_unload == 1:
+            i = 0
+            while i < nbox:
+                if i < len(self.box_unload):
+                    if self.box_unload[i] == 1:
+                        skipb[i] = 1
+                i = i + 1
+            i = 0
+            while i < nbomb:
+                if i < len(self.bomb_unload):
+                    if self.bomb_unload[i] == 1:
+                        skipm[i] = 1
+                i = i + 1
+            k0 = self._applybuf_box_off()
+            i = 0
+            while i < nbox:
+                if skipb[i] == 0:
+                    cpx = d[k0 + i * 4]
+                    cpy = d[k0 + i * 4 + 1]
+                    cpl = d[k0 + i * 4 + 3]
+                    if cpl == 1:
+                        if self._unloadable_at(cpx, cpy) == 1:
+                            skipb[i] = 1
+                i = i + 1
+            kb = k0 + nbox * 4
+            i = 0
+            while i < nbomb:
+                if skipm[i] == 0:
+                    cpx = d[kb + i * 3]
+                    cpy = d[kb + i * 3 + 1]
+                    cpl = d[kb + i * 3 + 2]
+                    if cpl == 1:
+                        if self._unloadable_at(cpx, cpy) == 1:
+                            skipm[i] = 1
+                i = i + 1
+            ks = kb + nbomb * 3 + len(self.swarmx) * 2
+            ns_peek = d[ks]
+            ks = ks + 1
+            si = 0
+            while si < ns_peek:
+                while si >= len(skips):
+                    skips.append(0)
+                np = d[ks + 9]
+                hit = 0
+                j = 0
+                while j < np:
+                    cpx = d[ks + 10 + j * 3]
+                    cpy = d[ks + 10 + j * 3 + 1]
+                    if self._unloadable_at(cpx, cpy) == 1:
+                        hit = 1
+                    j = j + 1
+                if hit == 1:
+                    skips[si] = 1
+                ks = ks + 10 + np * 3
+                si = si + 1
+
         k = 0
         self.turn = d[k]
         k = k + 1
@@ -925,7 +1146,7 @@ class Game:
         i = 0
         while i < n:
             self.filled[i] = d[k]
-            self.fillbox[i] = d[k + 1]
+            self.fillsbox[i] = d[k + 1]
             self.trapst[i] = d[k + 2]
             self.wall[i] = d[k + 3]
             self.pit[i] = d[k + 4]
@@ -967,8 +1188,12 @@ class Game:
             k = k + 1
             i = i + 1
         i = 0
-        n = len(self.boxx)
-        while i < n:
+        while i < nbox:
+            if skip_unload == 1:
+                if skipb[i] == 1:
+                    k = k + 4
+                    i = i + 1
+                    continue
             self.boxx[i] = d[k]
             self.boxy[i] = d[k + 1]
             self.boxz[i] = d[k + 2]
@@ -976,14 +1201,38 @@ class Game:
             k = k + 4
             i = i + 1
         i = 0
-        n = len(self.bombx)
-        while i < n:
+        while i < nbomb:
+            if skip_unload == 1:
+                if skipm[i] == 1:
+                    k = k + 3
+                    i = i + 1
+                    continue
             self.bombx[i] = d[k]
             self.bomby[i] = d[k + 1]
             self.bomblive[i] = d[k + 2]
             k = k + 3
             i = i + 1
         self.snap_obj_visuals()
+        if skip_unload == 1:
+            # Zones/portals mounted on a skipped box stay with the live box.
+            i = 0
+            while i < len(self.connx):
+                bi = self.connbox[i]
+                if bi >= 0:
+                    if bi < nbox:
+                        if skipb[bi] == 1:
+                            self.connx[i] = live_connx[i]
+                            self.conny[i] = live_conny[i]
+                i = i + 1
+            i = 0
+            while i < len(self.porx):
+                bi = self.porbox[i]
+                if bi >= 0:
+                    if bi < nbox:
+                        if skipb[bi] == 1:
+                            self.porx[i] = live_porx[i]
+                            self.pory[i] = live_pory[i]
+                i = i + 1
         i = 0
         n = len(self.swarmx)
         while i < n:
@@ -995,6 +1244,13 @@ class Game:
         k = k + 1
         i = 0
         while i < ns:
+            if skip_unload == 1:
+                if i < len(skips):
+                    if skips[i] == 1:
+                        np = d[k + 9]
+                        k = k + 10 + np * 3
+                        i = i + 1
+                        continue
             s = self.snake(i)
             s.alive = d[k]
             s.gone = d[k + 1]
@@ -1019,19 +1275,91 @@ class Game:
                 j = j + 1
             s.snap_visual()
             i = i + 1
-        # clones past the restored count vanish (undo before their creation)
-        while i < self.nsnakes:
-            s = self.snake(i)
-            s.gone = 1
-            s.alive = 0
-            s.xs = []
-            s.ys = []
-            s.zs = []
+        # Clones past the restored count vanish unless checkpoint-skipped.
+        new_ns = ns
+        i = ns
+        while i < old_ns:
+            keep = 0
+            if skip_unload == 1:
+                if i < len(skips):
+                    if skips[i] == 1:
+                        keep = 1
+            if keep == 1:
+                if i + 1 > new_ns:
+                    new_ns = i + 1
+            else:
+                s = self.snake(i)
+                s.gone = 1
+                s.alive = 0
+                s.xs = []
+                s.ys = []
+                s.zs = []
             i = i + 1
-        self.nsnakes = ns
-        if self.active >= ns:
+        self.nsnakes = new_ns
+        if self.active >= self.nsnakes:
             self.set_active(0)
-        self.bombq = []                     # never carry a mid-move queue across undo/load
+        self.bombq = []
+
+        if skip_unload == 1:
+            # Live pit fills whose filler was not restored stay filled.
+            i = 0
+            while i < ncell:
+                if live_filled[i] == 1:
+                    if self.filled[i] == 0:
+                        keep = 0
+                        cx = self.minx + (i % self.gw)
+                        cy = self.miny + (i // self.gw)
+                        if self._unloadable_sunk_at(cx, cy) == 1:
+                            keep = 1
+                        fb = live_fillsbox[i]
+                        if fb >= 0:
+                            if fb < nbox:
+                                if skipb[fb] == 1:
+                                    if self.boxx[fb] == cx:
+                                        if self.boxy[fb] == cy:
+                                            if self.boxlive[fb] == 0:
+                                                keep = 1
+                                            if self.boxz[fb] > 0:
+                                                keep = 1
+                        if keep == 1:
+                            self.filled[i] = 1
+                            self.fillsbox[i] = live_fillsbox[i]
+                # Exploded weak walls stay gone if an unrestored box/bomb
+                # still occupies the cell (Unloadable or overlap-blocked).
+                if live_wall[i] == 0:
+                    if self.wall[i] == 5:
+                        cx = self.minx + (i % self.gw)
+                        cy = self.miny + (i // self.gw)
+                        if self._unrestored_obj_at(cx, cy, skipb,
+                                                   skipm) == 1:
+                            self.wall[i] = 0
+                i = i + 1
+            self.dirty = 1
+
+    def _unrestored_obj_at(self, x: int, y: int, skipb: "list[int]",
+                           skipm: "list[int]") -> int:
+        """1 if a skipped (Unloadable / overlap-blocked) box or bomb is on
+        the surface at (x, y) after a checkpoint load."""
+        i = 0
+        while i < len(self.boxx):
+            if i < len(skipb):
+                if skipb[i] == 1:
+                    if self.boxlive[i] == 1:
+                        if self.boxz[i] == 0:
+                            if self.boxx[i] == x:
+                                if self.boxy[i] == y:
+                                    return 1
+            i = i + 1
+        i = 0
+        while i < len(self.bombx):
+            if i < len(skipm):
+                if skipm[i] == 1:
+                    if self.bomblive[i] == 1:
+                        if self.bombx[i] == x:
+                            if self.bomby[i] == y:
+                                return 1
+            i = i + 1
+        return 0
 
     # undo/redo entries are [corelen, core..., chklen, chk...] appended to a
     # flat int array; a parallel array holds each entry's total length. The
@@ -1673,6 +2001,9 @@ class Game:
         d.colb = src.colb
         d.fdx = src.fdx
         d.fdy = src.fdy
+        d.warp = 0
+        d.wdx = 0
+        d.wdy = 0
         d.xs = []
         d.ys = []
         d.zs = []
@@ -1750,9 +2081,12 @@ class Game:
             k = k + 1
         e0 = self.entbuf[0]
         o0 = self.portal_other(e0)
-        s.translate(self.porx[o0] - self.porx[e0],
-                    self.pory[o0] - self.pory[e0])
-        s.snap_visual()
+        dx = self.porx[o0] - self.porx[e0]
+        dy = self.pory[o0] - self.pory[e0]
+        s.translate(dx, dy)
+        s.warp = 1
+        s.wdx = dx
+        s.wdy = dy
         self.pairlock[self.porpair[e0]] = 1
         _log("[game] teleported")
         return 1
@@ -1768,7 +2102,10 @@ class Game:
             if self.snake_fits(si, dx, dy) == 1:
                 s = self.snake(si)
                 s.translate(dx, dy)
-                s.snap_visual()
+                # Crawl into the entry portal first; snap to exit after.
+                s.warp = 1
+                s.wdx = dx
+                s.wdy = dy
                 self.pairlock[self.porpair[pi]] = 1
                 _log("[game] teleported")
                 return 1
@@ -1780,6 +2117,9 @@ class Game:
                 self.boxx[bx] = px + dx
                 self.boxy[bx] = py + dy
                 self.move_box_connectables(bx, dx, dy)
+                self.box_warp[bx] = 1
+                self.box_wdx[bx] = dx
+                self.box_wdy[bx] = dy
                 self.pairlock[self.porpair[pi]] = 1
                 self.object_landed(bx, -1)
                 _log("[game] box teleported")
@@ -1791,6 +2131,9 @@ class Game:
             if self.cell_free(px + dx, py + dy, -1) == 1:
                 self.bombx[bb] = px + dx
                 self.bomby[bb] = py + dy
+                self.bomb_warp[bb] = 1
+                self.bomb_wdx[bb] = dx
+                self.bomb_wdy[bb] = dy
                 self.pairlock[self.porpair[pi]] = 1
                 self.object_landed(-1, bb)
                 return 1
@@ -2321,7 +2664,7 @@ class Game:
             if len(self.chkdata) > 0:       # no save yet: do nothing
                 _log("[game] checkpoint loaded")
                 self._copybuf(4, 1)         # chkdata -> applybuf
-                self.apply_buf()
+                self.apply_checkpoint()
         self.update_traps_arming()
         self.update_swarms()
         self.check_pits()
@@ -2499,6 +2842,12 @@ class Game:
         self.cspr_ex(sid, px - soff, py + soff, wf, hf, 0, 128, 0)
         self.cspr(sid, px, py, wf, hf)
 
+    def cspr_unload_wash(self, sid: int, px: int, py: int,
+                         wf: int, hf: int) -> None:
+        """Blend 35% toward white using the sprite as an alpha mask."""
+        self.cspr_ex(sid, px, py, wf, hf, engine.SOLID_WHITE,
+                     engine.UNLOAD_WASH, 0)
+
     def cspr_ex(self, sid: int, px: int, py: int, wf: int, hf: int,
                 tint: int, alpha: int, rot: int) -> None:
         cell = self.cell
@@ -2537,6 +2886,50 @@ class Game:
             engine.rect_a(lx - d // 2, ly - d // 2, d, d, rgb, alpha)
             seg = seg + 1
 
+    def conn_draw_px(self, lx: int, ly: int, bi: int) -> int:
+        """Screen x for a portal/zone at logical (lx, ly).
+
+        If anchored to box bi, rides the box's visual lerp so the offset
+        from the box is preserved during the crawl.
+        """
+        if bi < 0:
+            return self.cell_px(lx)
+        if bi >= len(self.boxx):
+            return self.cell_px(lx)
+        if bi >= len(self.boxvx):
+            return self.cell_px(lx)
+        return self.ox + (self.boxvx[bi] * self.cell) // 256 + \
+            (lx - self.boxx[bi]) * self.cell
+
+    def conn_draw_py(self, lx: int, ly: int, bi: int) -> int:
+        """Screen y companion to conn_draw_px."""
+        if bi < 0:
+            return self.cell_py(ly)
+        if bi >= len(self.boxx):
+            return self.cell_py(ly)
+        if bi >= len(self.boxvy):
+            return self.cell_py(ly)
+        return self.oy - (self.boxvy[bi] * self.cell) // 256 - \
+            (ly - self.boxy[bi]) * self.cell
+
+    def conn_vis_cell(self, lx: int, ly: int, bi: int, axis: int) -> int:
+        """Visual cell (axis 0=x, 1=y) for wall/door hide checks."""
+        if bi < 0:
+            if axis == 0:
+                return lx
+            return ly
+        if bi >= len(self.boxx):
+            if axis == 0:
+                return lx
+            return ly
+        if axis == 0:
+            if bi >= len(self.boxvx):
+                return lx
+            return self._vis_cell(self.boxvx[bi] + (lx - self.boxx[bi]) * 256)
+        if bi >= len(self.boxvy):
+            return ly
+        return self._vis_cell(self.boxvy[bi] + (ly - self.boxy[bi]) * 256)
+
     def draw_connectable_line(self, zx: int, zy: int, bi: int,
                               rgb: int) -> None:
         """Zone/portal → box/bomb line; alpha matches line.startColor.a."""
@@ -2547,8 +2940,8 @@ class Game:
         if self.boxlive[bi] == 0:
             return
         cell = self.cell
-        x0 = self.cell_px(zx) + cell // 2
-        y0 = self.cell_py(zy) + cell // 2
+        x0 = self.conn_draw_px(zx, zy, bi) + cell // 2
+        y0 = self.conn_draw_py(zx, zy, bi) + cell // 2
         x1 = self.ox + (self.boxvx[bi] * cell) // 256 + cell // 2
         y1 = self.oy - (self.boxvy[bi] * cell) // 256 + cell // 2
         # startColor.a = 0.2509804 → 64/256
@@ -2593,8 +2986,13 @@ class Game:
                     if self.filled[i] == 1:
                         engine.rect_a(px, py, cell, cell, 4139348, 120)
                         if self.fillbox[i] >= 0:
+                            bi = self.fillbox[i]
                             self.cspr_ex(engine.SPR_BOX, px, py, 179, 173,
                                          8421504, 256, 0)
+                            if bi < len(self.box_unload):
+                                if self.box_unload[bi] == 1:
+                                    self.cspr_unload_wash(
+                                        engine.SPR_BOX, px, py, 179, 173)
                     elif self.pit[i] == 1:
                         engine.sprite(engine.SPR_SHALLOW, px, py, cell, cell)
                     elif self.pit[i] == 2:
@@ -2660,15 +3058,24 @@ class Game:
         # (0,1,1,a≈0.25) from Portal.prefab LineRenderer gradient.
         i = 0
         while i < len(self.porx):
-            self.draw_connectable_line(self.porx[i], self.pory[i],
-                                       self.porbox[i], 65535)
+            bi = self.porbox[i]
+            vx = self.conn_vis_cell(self.porx[i], self.pory[i], bi, 0)
+            vy = self.conn_vis_cell(self.porx[i], self.pory[i], bi, 1)
+            if self.in_wall_or_door(vx, vy) == 0:
+                self.draw_connectable_line(self.porx[i], self.pory[i],
+                                           bi, 65535)
             i = i + 1
         # rotating portal sprites (order 250), prefab scale 0.9
         i = 0
         while i < len(self.porx):
-            self.cspr_ex(engine.SPR_PORTAL, self.cell_px(self.porx[i]),
-                         self.cell_py(self.pory[i]), 230, 230,
-                         self.porcol[i], 256, (tms // 300) & 3)
+            bi = self.porbox[i]
+            vx = self.conn_vis_cell(self.porx[i], self.pory[i], bi, 0)
+            vy = self.conn_vis_cell(self.porx[i], self.pory[i], bi, 1)
+            if self.in_wall_or_door(vx, vy) == 0:
+                self.cspr_ex(engine.SPR_PORTAL,
+                             self.conn_draw_px(self.porx[i], self.pory[i], bi),
+                             self.conn_draw_py(self.porx[i], self.pory[i], bi),
+                             230, 230, self.porcol[i], 256, (tms // 300) & 3)
             i = i + 1
         # apple (275) then boxes/bombs (300) -- above portals, below snakes.
         # Kept out of the static bake so rotating portals stay underneath.
@@ -2680,32 +3087,42 @@ class Game:
         i = 0
         while i < len(self.connx):
             t = self.conntype[i]
-            if t == 1:
-                self.draw_connectable_line(self.connx[i], self.conny[i],
-                                           self.connbox[i], 16744703)
-            if t == 3:
-                self.draw_connectable_line(self.connx[i], self.conny[i],
-                                           self.connbox[i], 16744448)
+            bi = self.connbox[i]
+            vx = self.conn_vis_cell(self.connx[i], self.conny[i], bi, 0)
+            vy = self.conn_vis_cell(self.connx[i], self.conny[i], bi, 1)
+            if self.in_wall_or_door(vx, vy) == 0:
+                if t == 1:
+                    self.draw_connectable_line(self.connx[i], self.conny[i],
+                                               bi, 16744703)
+                if t == 3:
+                    self.draw_connectable_line(self.connx[i], self.conny[i],
+                                               bi, 16744448)
             i = i + 1
         i = 0
         while i < len(self.boxx):
             if self.boxlive[i] == 1:
                 if self.boxz[i] == 0:
                     # Box prefab: 244x236 art at 244 ppu, scale 0.7
-                    self.cspr_drop(engine.SPR_BOX,
-                                   self.ox + (self.boxvx[i] * cell) // 256,
-                                   self.oy - (self.boxvy[i] * cell) // 256,
-                                   179, 173, 256)
+                    bpx = self.ox + (self.boxvx[i] * cell) // 256
+                    bpy = self.oy - (self.boxvy[i] * cell) // 256
+                    self.cspr_drop(engine.SPR_BOX, bpx, bpy, 179, 173, 256)
+                    if i < len(self.box_unload):
+                        if self.box_unload[i] == 1:
+                            self.cspr_unload_wash(engine.SPR_BOX, bpx, bpy,
+                                                  179, 173)
             i = i + 1
         i = 0
         while i < len(self.bombx):
             if self.bomblive[i] == 1:
                 # Bomb prefab: 257x286 art at 286 ppu, scale 0.9
                 # Shadow sits .65× as far as boxes/snakes (166/256).
-                self.cspr_drop(engine.SPR_BOMB,
-                               self.ox + (self.bombvx[i] * cell) // 256,
-                               self.oy - (self.bombvy[i] * cell) // 256,
-                               207, 230, 166)
+                bpx = self.ox + (self.bombvx[i] * cell) // 256
+                bpy = self.oy - (self.bombvy[i] * cell) // 256
+                self.cspr_drop(engine.SPR_BOMB, bpx, bpy, 207, 230, 166)
+                if i < len(self.bomb_unload):
+                    if self.bomb_unload[i] == 1:
+                        self.cspr_unload_wash(engine.SPR_BOMB, bpx, bpy,
+                                              207, 230)
             i = i + 1
         # snakes (order 300/302)
         si = 0
@@ -2716,17 +3133,28 @@ class Game:
         i = 0
         while i < len(self.connx):
             if self.conntype[i] == 2:
-                self.draw_connectable_line(self.connx[i], self.conny[i],
-                                           self.connbox[i], 255)
+                bi = self.connbox[i]
+                vx = self.conn_vis_cell(self.connx[i], self.conny[i], bi, 0)
+                vy = self.conn_vis_cell(self.connx[i], self.conny[i], bi, 1)
+                if self.in_wall_or_door(vx, vy) == 0:
+                    self.draw_connectable_line(self.connx[i], self.conny[i],
+                                               bi, 255)
             i = i + 1
         # Bugs and the foreground renderer of propel zones are order 400 in
         # the Unity prefabs, so both belong in front of snakes.
         i = 0
         while i < len(self.connx):
             if self.conntype[i] == 1:
-                # Propel Zone prefab: square art, scale 0.97
-                self.cspr(engine.SPR_PROPEL, self.cell_px(self.connx[i]),
-                          self.cell_py(self.conny[i]), 248, 248)
+                bi = self.connbox[i]
+                vx = self.conn_vis_cell(self.connx[i], self.conny[i], bi, 0)
+                vy = self.conn_vis_cell(self.connx[i], self.conny[i], bi, 1)
+                if self.in_wall_or_door(vx, vy) == 0:
+                    # Propel Zone prefab: square art, scale 0.97
+                    self.cspr(engine.SPR_PROPEL,
+                              self.conn_draw_px(self.connx[i], self.conny[i],
+                                                bi),
+                              self.conn_draw_py(self.connx[i], self.conny[i],
+                                                bi), 248, 248)
             i = i + 1
         i = 0
         while i < len(self.swarmx):
@@ -2735,7 +3163,7 @@ class Game:
                 py = self.cell_py(self.swarmy[i])
                 bw = cell * 38 // 256   # Bug prefab scale 0.15
                 b = 0
-                while b < 3:
+                while b < 8:
                     ph = tms // 90 + b * 37 + i * 11
                     wx = (ph * 1103515245 + 12345) & 255
                     wy = ((ph + 7) * 214013 + 2531011) & 255
@@ -2750,14 +3178,24 @@ class Game:
         i = 0
         while i < len(self.connx):
             t = self.conntype[i]
-            if t == 2:
-                # Save Icon: 340x393 at 393 ppu, zone scale 0.97
-                self.cspr(engine.SPR_SAVE, self.cell_px(self.connx[i]),
-                          self.cell_py(self.conny[i]), 215, 248)
-            if t == 3:
-                # Load Icon: 176x86 at 176 ppu, zone scale 0.97
-                self.cspr(engine.SPR_LOAD, self.cell_px(self.connx[i]),
-                          self.cell_py(self.conny[i]), 248, 121)
+            bi = self.connbox[i]
+            vx = self.conn_vis_cell(self.connx[i], self.conny[i], bi, 0)
+            vy = self.conn_vis_cell(self.connx[i], self.conny[i], bi, 1)
+            if self.in_wall_or_door(vx, vy) == 0:
+                if t == 2:
+                    # Save Icon: 340x393 at 393 ppu, zone scale 0.97
+                    self.cspr(engine.SPR_SAVE,
+                              self.conn_draw_px(self.connx[i], self.conny[i],
+                                                bi),
+                              self.conn_draw_py(self.connx[i], self.conny[i],
+                                                bi), 215, 248)
+                if t == 3:
+                    # Load Icon: 176x86 at 176 ppu, zone scale 0.97
+                    self.cspr(engine.SPR_LOAD,
+                              self.conn_draw_px(self.connx[i], self.conny[i],
+                                                bi),
+                              self.conn_draw_py(self.connx[i], self.conny[i],
+                                                bi), 248, 121)
             i = i + 1
         i = 0
         while i < len(self.starx):
@@ -3076,10 +3514,22 @@ class Game:
             else:
                 self.boxvx.append(self.boxx[i] * 256)
                 self.boxvy.append(self.boxy[i] * 256)
+            if i < len(self.box_warp):
+                self.box_warp[i] = 0
+                self.box_wdx[i] = 0
+                self.box_wdy[i] = 0
+            else:
+                self.box_warp.append(0)
+                self.box_wdx.append(0)
+                self.box_wdy.append(0)
             i = i + 1
         while len(self.boxvx) > len(self.boxx):
             self.boxvx.pop()
             self.boxvy.pop()
+        while len(self.box_warp) > len(self.boxx):
+            self.box_warp.pop()
+            self.box_wdx.pop()
+            self.box_wdy.pop()
         i = 0
         n = len(self.bombx)
         while i < n:
@@ -3089,10 +3539,22 @@ class Game:
             else:
                 self.bombvx.append(self.bombx[i] * 256)
                 self.bombvy.append(self.bomby[i] * 256)
+            if i < len(self.bomb_warp):
+                self.bomb_warp[i] = 0
+                self.bomb_wdx[i] = 0
+                self.bomb_wdy[i] = 0
+            else:
+                self.bomb_warp.append(0)
+                self.bomb_wdx.append(0)
+                self.bomb_wdy.append(0)
             i = i + 1
         while len(self.bombvx) > len(self.bombx):
             self.bombvx.pop()
             self.bombvy.pop()
+        while len(self.bomb_warp) > len(self.bombx):
+            self.bomb_warp.pop()
+            self.bomb_wdx.pop()
+            self.bomb_wdy.pop()
 
     def _vis_cell(self, v: int) -> int:
         """Nearest cell index for a 1/256 visual coordinate."""
@@ -3170,6 +3632,7 @@ class Game:
 
     def animate(self, dtms: int) -> None:
         step = (dtms * 256) // CRAWL_MS     # 1 cell per CRAWL_MS
+        arrive = 8
         si = 0
         while si < self.nsnakes:
             s = self.snake(si)
@@ -3177,15 +3640,26 @@ class Game:
             n = s.npart()
             while j < n:
                 if j < len(s.vx):
+                    # Portal warp: finish crawling onto the entry cell first.
                     tx = s.xs[j] * 256
                     ty = s.ys[j] * 256
+                    if s.warp == 1:
+                        tx = (s.xs[j] - s.wdx) * 256
+                        ty = (s.ys[j] - s.wdy) * 256
                     vx = s.vx[j]
                     vy = s.vy[j]
                     ddx = tx - vx
-                    if ddx > 512:
-                        vx = tx             # teleports snap
-                    elif ddx < -512:
-                        vx = tx
+                    if s.warp == 0:
+                        if ddx > 512:
+                            vx = tx
+                        elif ddx < -512:
+                            vx = tx
+                        elif ddx > step:
+                            vx = vx + step
+                        elif ddx < 0 - step:
+                            vx = vx - step
+                        else:
+                            vx = tx
                     elif ddx > step:
                         vx = vx + step
                     elif ddx < 0 - step:
@@ -3193,10 +3667,17 @@ class Game:
                     else:
                         vx = tx
                     ddy = ty - vy
-                    if ddy > 512:
-                        vy = ty
-                    elif ddy < -512:
-                        vy = ty
+                    if s.warp == 0:
+                        if ddy > 512:
+                            vy = ty
+                        elif ddy < -512:
+                            vy = ty
+                        elif ddy > step:
+                            vy = vy + step
+                        elif ddy < 0 - step:
+                            vy = vy - step
+                        else:
+                            vy = ty
                     elif ddy > step:
                         vy = vy + step
                     elif ddy < 0 - step:
@@ -3206,19 +3687,41 @@ class Game:
                     s.vx[j] = vx
                     s.vy[j] = vy
                 j = j + 1
+            if s.warp == 1:
+                done = 1
+                j = 0
+                while j < n:
+                    if j < len(s.vx):
+                        tx = (s.xs[j] - s.wdx) * 256
+                        ty = (s.ys[j] - s.wdy) * 256
+                        if self._manhattan256(s.vx[j], s.vy[j],
+                                              tx, ty) > arrive:
+                            done = 0
+                    j = j + 1
+                if done == 1:
+                    s.snap_visual()
             si = si + 1
-        # Boxes/bombs: wait until the pusher visually arrives, then crawl.
+        # Boxes/bombs: portal warp, else wait for pusher contact then crawl.
         i = 0
         while i < len(self.boxx):
             if self.boxlive[i] == 1:
                 if i < len(self.boxvx):
                     tx = self.boxx[i] * 256
                     ty = self.boxy[i] * 256
+                    warping = 0
+                    if i < len(self.box_warp):
+                        if self.box_warp[i] == 1:
+                            warping = 1
+                            tx = (self.boxx[i] - self.box_wdx[i]) * 256
+                            ty = (self.boxy[i] - self.box_wdy[i]) * 256
                     vx = self.boxvx[i]
                     vy = self.boxvy[i]
                     ddx = tx - vx
                     ddy = ty - vy
-                    if ddx > 512:
+                    move = 0
+                    if warping == 1:
+                        move = 1
+                    elif ddx > 512:
                         vx = tx
                         vy = ty
                     elif ddx < -512:
@@ -3231,6 +3734,8 @@ class Game:
                         vx = tx
                         vy = ty
                     elif self.push_contact_ready(vx, vy, i, -1) == 1:
+                        move = 1
+                    if move == 1:
                         if ddx > step:
                             vx = vx + step
                         elif ddx < 0 - step:
@@ -3245,6 +3750,13 @@ class Game:
                             vy = ty
                     self.boxvx[i] = vx
                     self.boxvy[i] = vy
+                    if warping == 1:
+                        if self._manhattan256(vx, vy, tx, ty) <= arrive:
+                            self.boxvx[i] = self.boxx[i] * 256
+                            self.boxvy[i] = self.boxy[i] * 256
+                            self.box_warp[i] = 0
+                            self.box_wdx[i] = 0
+                            self.box_wdy[i] = 0
             i = i + 1
         i = 0
         while i < len(self.bombx):
@@ -3252,11 +3764,20 @@ class Game:
                 if i < len(self.bombvx):
                     tx = self.bombx[i] * 256
                     ty = self.bomby[i] * 256
+                    warping = 0
+                    if i < len(self.bomb_warp):
+                        if self.bomb_warp[i] == 1:
+                            warping = 1
+                            tx = (self.bombx[i] - self.bomb_wdx[i]) * 256
+                            ty = (self.bomby[i] - self.bomb_wdy[i]) * 256
                     vx = self.bombvx[i]
                     vy = self.bombvy[i]
                     ddx = tx - vx
                     ddy = ty - vy
-                    if ddx > 512:
+                    move = 0
+                    if warping == 1:
+                        move = 1
+                    elif ddx > 512:
                         vx = tx
                         vy = ty
                     elif ddx < -512:
@@ -3269,6 +3790,8 @@ class Game:
                         vx = tx
                         vy = ty
                     elif self.push_contact_ready(vx, vy, -1, i) == 1:
+                        move = 1
+                    if move == 1:
                         if ddx > step:
                             vx = vx + step
                         elif ddx < 0 - step:
@@ -3283,6 +3806,13 @@ class Game:
                             vy = ty
                     self.bombvx[i] = vx
                     self.bombvy[i] = vy
+                    if warping == 1:
+                        if self._manhattan256(vx, vy, tx, ty) <= arrive:
+                            self.bombvx[i] = self.bombx[i] * 256
+                            self.bombvy[i] = self.bomby[i] * 256
+                            self.bomb_warp[i] = 0
+                            self.bomb_wdx[i] = 0
+                            self.bomb_wdy[i] = 0
             i = i + 1
 
     # ------------------------------------------------------------- screens

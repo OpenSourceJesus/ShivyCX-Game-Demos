@@ -17,8 +17,8 @@ The level record grammar (one record per line, ints only):
   V vw vh cx100 cy100      view size in cells + camera center *100
   W x y kind               wall (kind 0..3 = Wall/2/3/4), 4 = weak wall
   P x y type               pit: 0 shallow, 1 deep, 2 bottomless
-  O x y                    box
-  M x y                    bomb
+  O x y unload             box (unload=1 if Unity Unloadable is attached)
+  M x y unload             bomb (unload=1 if Unity Unloadable is attached)
   A x y                    apple (End)
   * x y                    star
   I x y                    propel (ice) zone
@@ -116,10 +116,20 @@ MOD_RE = re.compile(
     r"\s*objectReference: \{fileID: (-?\d+)\}")
 
 
+# Unloadable.cs — scene PrefabInstances add this as m_AddedComponents.
+UNLOADABLE_GUID = "5a113f1e8e09ff03c94a2fc1e2ab1fab"
+
+
 def parse_scene(path):
-    """-> (instances{fid:Instance}, stripped{fid:(instance_fid)})"""
+    """-> (instances, stripped, unloadable_fids)
+
+    unloadable_fids: PrefabInstance fileIDs that have an Unloadable
+    MonoBehaviour in m_AddedComponents (boxes/bombs that trigger load zones).
+    """
     text = open(path, encoding="utf-8", errors="replace").read()
     instances, stripped = {}, {}
+    unload_mbs = set()
+    prefab_bodies = {}
     for cls, fid, is_stripped, body in split_docs(text):
         if cls == 1001:  # PrefabInstance
             g = re.search(r"m_SourcePrefab: \{fileID: \d+, guid: "
@@ -134,11 +144,20 @@ def parse_scene(path):
                 if ref:
                     inst.refs[key] = ref
             instances[fid] = inst
+            prefab_bodies[fid] = body
+        elif cls == 114 and UNLOADABLE_GUID in body:
+            unload_mbs.add(fid)
         elif is_stripped:
             m = re.search(r"m_PrefabInstance: \{fileID: (\d+)\}", body)
             if m:
                 stripped[fid] = int(m.group(1))
-    return instances, stripped
+    unloadable = set()
+    for mid in unload_mbs:
+        needle = "addedObject: {fileID: %d}" % mid
+        for fid, body in prefab_bodies.items():
+            if needle in body:
+                unloadable.add(fid)
+    return instances, stripped, unloadable
 
 
 # ------------------------------------------------------------ prefab lookup
@@ -207,7 +226,7 @@ def instance_pos(inst):
 
 
 def extract_level(scene_path, guids):
-    instances, stripped = parse_scene(scene_path)
+    instances, stripped, unloadable = parse_scene(scene_path)
     for inst in instances.values():
         inst.valid = prefab_targets(guids.get(inst.guid, ""), guids)
 
@@ -251,10 +270,12 @@ def extract_level(scene_path, guids):
         elif name == "Bottomless Pit":
             recs.append("P %d %d 2" % (cx, cy))
         elif name == "Box":
+            u = 1 if fid in unloadable else 0
             boxes.append((fid, cx, cy))
-            recs.append("O %d %d" % (cx, cy))
+            recs.append("O %d %d %d" % (cx, cy, u))
         elif name == "Bomb":
-            recs.append("M %d %d" % (cx, cy))
+            u = 1 if fid in unloadable else 0
+            recs.append("M %d %d %d" % (cx, cy, u))
         elif name == "End":
             recs.append("A %d %d" % (cx, cy))
         elif name == "Star":
@@ -625,7 +646,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--game", default=os.path.expanduser("~/snake-game"))
     ap.add_argument("--out", default=os.path.join(HERE, ".."))
-    ap.add_argument("--levels", type=int, default=43)
+    ap.add_argument("--levels", type=int, default=44)
     ap.add_argument("--solve", type=int, default=0)
     args = ap.parse_args()
 

@@ -91,7 +91,10 @@ SPR_BLOCKED = 30
 SPR_BACKGROUND = 31
 
 NO_TINT = 16777215          # 0xFFFFFF
+# Top byte 0x01: solid RGB from low 24 bits; sprite supplies alpha only.
+SOLID_WHITE = 33554431      # 0x01FFFFFF
 OPAQUE = 256
+UNLOAD_WASH = 90            # ~35% toward white over unloadable boxes/bombs
 
 
 def width() -> int:
