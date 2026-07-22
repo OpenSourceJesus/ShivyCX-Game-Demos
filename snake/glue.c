@@ -92,6 +92,32 @@ void sg_circle(int cx, int cy, int r, int rgb) {
     }
 }
 
+void sg_circle_a(int cx, int cy, int r, int rgb, int alpha) {
+    int W = (int)gfx_width(), H = (int)gfx_height();
+    int x, y, r2 = r * r;
+    u32 a = (u32)alpha, na = 256u - a;
+    u32 sr = (((u32)rgb >> 16) & 0xFF) * a;
+    u32 sg = (((u32)rgb >> 8) & 0xFF) * a;
+    u32 sb = ((u32)rgb & 0xFF) * a;
+    for (y = -r; y <= r; y++) {
+        int py = cy + y;
+        if (py < 0 || py >= H) continue;
+        for (x = -r; x <= r; x++) {
+            int px = cx + x;
+            u32 dst, dr, dg, db;
+            if (px < 0 || px >= W) continue;
+            if (x * x + y * y > r2) continue;
+            dst = g_back[py * W + px];
+            dr = ((dst >> 16) & 0xFF) * na;
+            dg = ((dst >> 8) & 0xFF) * na;
+            db = (dst & 0xFF) * na;
+            g_back[py * W + px] = ((((sr + dr) >> 8) & 0xFF) << 16) |
+                                  ((((sg + dg) >> 8) & 0xFF) << 8) |
+                                  (((sb + db) >> 8) & 0xFF);
+        }
+    }
+}
+
 /* Rounded rectangle; `corners` is a bit mask of which corners get radius r:
  * 1 = top-left, 2 = top-right, 4 = bottom-left, 8 = bottom-right. The snake
  * uses this to round only the free ends of head/tail segments. */

@@ -26,6 +26,9 @@ _g.sg_rect_a.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int,
 _g.sg_circle.restype = None
 _g.sg_circle.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int,
                          ctypes.c_int]
+_g.sg_circle_a.restype = None
+_g.sg_circle_a.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                           ctypes.c_int, ctypes.c_int]
 _g.sg_round_rect.restype = None
 _g.sg_round_rect.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int,
                              ctypes.c_int, ctypes.c_int, ctypes.c_int,
@@ -119,6 +122,10 @@ def rect_a(x: int, y: int, w: int, h: int, rgb: int, alpha: int) -> None:
 
 def circle(cx: int, cy: int, r: int, rgb: int) -> None:
     _g.sg_circle(cx, cy, r, rgb)
+
+
+def circle_a(cx: int, cy: int, r: int, rgb: int, alpha: int) -> None:
+    _g.sg_circle_a(cx, cy, r, rgb, alpha)
 
 
 def round_rect(x: int, y: int, w: int, h: int, r: int, corners: int,

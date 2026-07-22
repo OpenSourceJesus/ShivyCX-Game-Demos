@@ -2870,9 +2870,9 @@ class Game:
         dist = adx + ady
         if dist < 1:
             return
-        step = self.cell // 4
-        if step < 4:
-            step = 4
+        step = self.cell // 8
+        if step < 2:
+            step = 2
         n = dist // step
         if n < 1:
             n = 1
@@ -2880,10 +2880,10 @@ class Game:
         while seg <= n:
             lx = x0 + dx * seg // n
             ly = y0 + dy * seg // n
-            d = self.u(6)
-            if d < 2:
-                d = 2
-            engine.rect_a(lx - d // 2, ly - d // 2, d, d, rgb, alpha)
+            r = self.u(9) // 2             # 1.5× prior u(6) diameter → radius
+            if r < 1:
+                r = 1
+            engine.circle_a(lx, ly, r, rgb, alpha)
             seg = seg + 1
 
     def conn_draw_px(self, lx: int, ly: int, bi: int) -> int:
@@ -3082,8 +3082,9 @@ class Game:
         # End prefab: 236x260 art at 260 ppu, scale 0.53
         self.cspr(engine.SPR_APPLE, self.cell_px(self.ax),
                   self.cell_py(self.ay), 123, 136)
-        # Propel/Load→carrier lines: sortingOrder 299. Colors from each
-        # zone prefab's Connectable.line.startColor (a≈0.25).
+        # Propel/Load/Save→carrier lines: drawn before boxes so the dots
+        # sit behind the carrier. Colors from each zone prefab's
+        # Connectable.line.startColor (a≈0.25).
         i = 0
         while i < len(self.connx):
             t = self.conntype[i]
@@ -3094,6 +3095,9 @@ class Game:
                 if t == 1:
                     self.draw_connectable_line(self.connx[i], self.conny[i],
                                                bi, 16744703)
+                if t == 2:
+                    self.draw_connectable_line(self.connx[i], self.conny[i],
+                                               bi, 255)
                 if t == 3:
                     self.draw_connectable_line(self.connx[i], self.conny[i],
                                                bi, 16744448)
@@ -3129,17 +3133,6 @@ class Game:
         while si < self.nsnakes:
             self.draw_snake(si, tms)
             si = si + 1
-        # Save→carrier lines: sortingOrder 399, startColor (0,0,1,a≈0.25)
-        i = 0
-        while i < len(self.connx):
-            if self.conntype[i] == 2:
-                bi = self.connbox[i]
-                vx = self.conn_vis_cell(self.connx[i], self.conny[i], bi, 0)
-                vy = self.conn_vis_cell(self.connx[i], self.conny[i], bi, 1)
-                if self.in_wall_or_door(vx, vy) == 0:
-                    self.draw_connectable_line(self.connx[i], self.conny[i],
-                                               bi, 255)
-            i = i + 1
         # Bugs and the foreground renderer of propel zones are order 400 in
         # the Unity prefabs, so both belong in front of snakes.
         i = 0
