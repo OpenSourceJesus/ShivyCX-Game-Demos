@@ -25,7 +25,7 @@ LD := ld
 # Divide the 1920x1080 authoring size by GFX_DIV for the window.
 # Example: GFX_DIV=3 → 640x360; GFX_DIV=1 → full 1920x1080.
 # Changing GFX_DIV must rebuild C objects (framebuffer arrays embed W×H).
-GFX_DIV ?= 3
+GFX_DIV ?= 2
 GFX_W := $(shell expr 1920 / $(GFX_DIV))
 GFX_H := $(shell expr 1080 / $(GFX_DIV))
 GFX_TAG := $(BUILD)/gfx_$(GFX_DIV)_$(GFX_W)x$(GFX_H).tag

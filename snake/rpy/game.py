@@ -49,6 +49,10 @@ class Snake:
         self.warp = 0
         self.wdx = 0
         self.wdy = 0
+        # Propel anim: crawl to mid (post-move) pose first, then to final xs.
+        self.mx: "list[int]" = []
+        self.my: "list[int]" = []
+        self.phase = 0                     # 0 → mid, 1 → final
 
     def npart(self) -> int:
         return len(self.xs)
@@ -58,6 +62,32 @@ class Snake:
 
     def head_y(self) -> int:
         return self.ys[0]
+
+    def capture_mid(self) -> None:
+        """Snapshot logical pose (used as the end of the crawl, before propel)."""
+        self.mx = []
+        self.my = []
+        j = 0
+        n = len(self.xs)
+        while j < n:
+            self.mx.append(self.xs[j])
+            self.my.append(self.ys[j])
+            j = j + 1
+        self.phase = 0
+
+    def mid_is_final(self) -> int:
+        """1 if mid pose already matches logical xs (no propel slide)."""
+        n = len(self.xs)
+        if len(self.mx) != n:
+            return 0
+        j = 0
+        while j < n:
+            if self.mx[j] != self.xs[j]:
+                return 0
+            if self.my[j] != self.ys[j]:
+                return 0
+            j = j + 1
+        return 1
 
     def occupies(self, x: int, y: int) -> int:
         """1 if a surface (solid) part covers the cell."""
@@ -111,6 +141,9 @@ class Snake:
         self.warp = 0
         self.wdx = 0
         self.wdy = 0
+        self.mx = []
+        self.my = []
+        self.phase = 0
 
 
 # NOTE: whole list values never cross function boundaries in this module --
@@ -170,6 +203,10 @@ class Game:
         self.box_warp: "list[int]" = []    # portal: crawl to entry before snap
         self.box_wdx: "list[int]" = []
         self.box_wdy: "list[int]" = []
+        self.box_coast: "list[int]" = []   # 1: propelled; crawl without push wait
+        # 1: snake/object already hit this box during the current propel; keep
+        # coasting together on later slide cells without re-waiting for contact.
+        self.box_coupled: "list[int]" = []
 
         self.bombx: "list[int]" = []
         self.bomby: "list[int]" = []
@@ -180,6 +217,8 @@ class Game:
         self.bomb_warp: "list[int]" = []
         self.bomb_wdx: "list[int]" = []
         self.bomb_wdy: "list[int]" = []
+        self.bomb_coast: "list[int]" = []
+        self.bomb_coupled: "list[int]" = []
         # pit-triggered blasts wait for the move to finish (the original
         # queues in Pit/TryPush and flushes at the end of Snake.Move), so
         # the pusher ends up inside the 3x3 blast zone before it fires
@@ -231,6 +270,20 @@ class Game:
         self.icesnake: "list[int]" = []
         self.icebox: "list[int]" = []
         self.icebomb: "list[int]" = []
+        self.snake_coast: "list[int]" = []  # 1: propelled; visual still catching up
+        self.in_slides = 0                  # 1 during a slide tick commit
+        self.slide_on = 0                   # 1: gradual propel in progress
+        self.slide_dx = 0
+        self.slide_dy = 0
+        self.slide_sn: "list[int]" = []     # who still wants to coast
+        self.slide_bx: "list[int]" = []
+        self.slide_bm: "list[int]" = []
+        self.turn_pending = 0               # finish hist/pits after slides
+        self.box_land_pend: "list[int]" = []
+        self.bomb_land_pend: "list[int]" = []
+        self.pend_move = 0                  # queued arrow after propel
+        self.pend_dx = 0
+        self.pend_dy = 0
 
         self.turn = 0
         self.lastdx = 0
@@ -554,6 +607,9 @@ class Game:
         self.box_warp = []
         self.box_wdx = []
         self.box_wdy = []
+        self.box_coast = []
+        self.box_coupled = []
+        self.box_land_pend = []
         self.bombx = []
         self.bomby = []
         self.bomblive = []
@@ -563,6 +619,9 @@ class Game:
         self.bomb_warp = []
         self.bomb_wdx = []
         self.bomb_wdy = []
+        self.bomb_coast = []
+        self.bomb_coupled = []
+        self.bomb_land_pend = []
         self.bombq = []
         self.porx = []
         self.pory = []
@@ -596,6 +655,22 @@ class Game:
         self.nsnakes = 0
         self.active = 0
         self.activems = engine.ms()
+        self.snake_coast = []
+        self.in_slides = 0
+        self.slide_on = 0
+        self.slide_dx = 0
+        self.slide_dy = 0
+        self.slide_sn = []
+        self.slide_bx = []
+        self.slide_bm = []
+        self.turn_pending = 0
+        self.box_land_pend = []
+        self.bomb_land_pend = []
+        self.box_coupled = []
+        self.bomb_coupled = []
+        self.pend_move = 0
+        self.pend_dx = 0
+        self.pend_dy = 0
         self.turn = 0
         self.lastdx = 0
         self.lastdy = 0
@@ -647,6 +722,9 @@ class Game:
                 self.box_warp.append(0)
                 self.box_wdx.append(0)
                 self.box_wdy.append(0)
+                self.box_coast.append(0)
+                self.box_coupled.append(0)
+                self.box_land_pend.append(0)
             elif op2 == "M":
                 self.bombx.append(x)
                 self.bomby.append(y)
@@ -660,6 +738,9 @@ class Game:
                 self.bomb_warp.append(0)
                 self.bomb_wdx.append(0)
                 self.bomb_wdy.append(0)
+                self.bomb_coast.append(0)
+                self.bomb_coupled.append(0)
+                self.bomb_land_pend.append(0)
             elif op2 == "A":
                 self.ax = x
                 self.ay = y
@@ -759,6 +840,7 @@ class Game:
                         s.fdx = s.xs[0] - s.xs[1]
                         s.fdy = s.ys[0] - s.ys[1]
                     s.snap_visual()
+                    self.snake_coast.append(0)
                     self.nsnakes = self.nsnakes + 1
 
         i = 0
@@ -1653,11 +1735,25 @@ class Game:
             self.boxx[bx] = nx
             self.boxy[bx] = ny
             self.move_box_connectables(bx, dx, dy)
-            self.object_landed(bx, -1)
+            if self.in_slides == 1:
+                # Logical moves now; sprite waits for first contact unless
+                # already coupled from an earlier hit this propel.
+                self._queue_box_land(bx)
+                if bx < len(self.box_coupled):
+                    if self.box_coupled[bx] == 1:
+                        self._mark_box_coast(bx)
+            else:
+                self.object_landed(bx, -1)
         else:
             self.bombx[bb] = nx
             self.bomby[bb] = ny
-            self.object_landed(-1, bb)
+            if self.in_slides == 1:
+                self._queue_bomb_land(bb)
+                if bb < len(self.bomb_coupled):
+                    if self.bomb_coupled[bb] == 1:
+                        self._mark_bomb_coast(bb)
+            else:
+                self.object_landed(-1, bb)
         return 1
 
     def try_push_snake(self, si: int, dx: int, dy: int,
@@ -1728,8 +1824,77 @@ class Game:
             j = j + 1
         s.translate(dx, dy)
         self.pushmask = self.pushmask ^ bit
+        if self.in_slides == 1:
+            self._mark_snake_coast(si)
         _log("[game] snake pushed")
         return 1
+
+    def _mark_box_coast(self, bi: int) -> None:
+        while len(self.box_coast) <= bi:
+            self.box_coast.append(0)
+        self.box_coast[bi] = 1
+
+    def _mark_bomb_coast(self, bi: int) -> None:
+        while len(self.bomb_coast) <= bi:
+            self.bomb_coast.append(0)
+        self.bomb_coast[bi] = 1
+
+    def _mark_box_coupled(self, bi: int) -> None:
+        while len(self.box_coupled) <= bi:
+            self.box_coupled.append(0)
+        self.box_coupled[bi] = 1
+        self._mark_box_coast(bi)
+
+    def _mark_bomb_coupled(self, bi: int) -> None:
+        while len(self.bomb_coupled) <= bi:
+            self.bomb_coupled.append(0)
+        self.bomb_coupled[bi] = 1
+        self._mark_bomb_coast(bi)
+
+    def _clear_push_couples(self) -> None:
+        i = 0
+        while i < len(self.box_coupled):
+            self.box_coupled[i] = 0
+            i = i + 1
+        i = 0
+        while i < len(self.bomb_coupled):
+            self.bomb_coupled[i] = 0
+            i = i + 1
+
+    def _mark_snake_coast(self, si: int) -> None:
+        while len(self.snake_coast) <= si:
+            self.snake_coast.append(0)
+        self.snake_coast[si] = 1
+
+    def _queue_box_land(self, bi: int) -> None:
+        while len(self.box_land_pend) <= bi:
+            self.box_land_pend.append(0)
+        self.box_land_pend[bi] = 1
+
+    def _queue_bomb_land(self, bi: int) -> None:
+        while len(self.bomb_land_pend) <= bi:
+            self.bomb_land_pend.append(0)
+        self.bomb_land_pend[bi] = 1
+
+    def _flush_box_land(self, bi: int) -> None:
+        if bi < 0:
+            return
+        if bi >= len(self.box_land_pend):
+            return
+        if self.box_land_pend[bi] == 1:
+            self.box_land_pend[bi] = 0
+            self.object_landed(bi, -1)
+            self.dirty = 1
+
+    def _flush_bomb_land(self, bi: int) -> None:
+        if bi < 0:
+            return
+        if bi >= len(self.bomb_land_pend):
+            return
+        if self.bomb_land_pend[bi] == 1:
+            self.bomb_land_pend[bi] = 0
+            self.object_landed(-1, bi)
+            self.dirty = 1
 
     def ice_zone_depth(self, ci: int) -> int:
         """Depth of propel zone ci: follows its connected box into pits.
@@ -2004,6 +2169,9 @@ class Game:
         d.warp = 0
         d.wdx = 0
         d.wdy = 0
+        d.mx = []
+        d.my = []
+        d.phase = 0
         d.xs = []
         d.ys = []
         d.zs = []
@@ -2016,6 +2184,7 @@ class Game:
             d.zs.append(src.zs[j])
             j = j + 1
         d.snap_visual()
+        self.snake_coast.append(0)
         self.nsnakes = self.nsnakes + 1
         return self.nsnakes - 1
 
@@ -2325,117 +2494,272 @@ class Game:
             self.boxx[bx] = nx
             self.boxy[bx] = ny
             self.move_box_connectables(bx, dx, dy)
-            self.object_landed(bx, -1)
+            self._mark_box_coast(bx)
+            self._queue_box_land(bx)
         else:
             self.bombx[bb] = nx
             self.bomby[bb] = ny
-            self.object_landed(-1, bb)
+            self._mark_bomb_coast(bb)
+            self._queue_bomb_land(bb)
         return 1
 
-    def resolve_slides(self, dx: int, dy: int) -> None:
-        """Coast entities that entered a (new) propel zone this turn."""
+    def begin_slides(self, dx: int, dy: int) -> int:
+        """Start gradual propel; 1 if anyone will coast this turn."""
         if dx == 0:
             if dy == 0:
-                return
-        if len(self.swarmx) + len(self.porx) + self.gw == 0:
-            return
-        coasts: "list[int]" = []
+                return 0
+        self.slide_sn = []
+        self.slide_bx = []
+        self.slide_bm = []
+        anyc = 0
         i = 0
         while i < self.nsnakes:
-            coasts.append(self.entered_ice_snake(i))
+            c = self.entered_ice_snake(i)
+            self.slide_sn.append(c)
+            if c == 1:
+                anyc = 1
+                self._mark_snake_coast(i)
+                s = self.snake(i)
+                s.phase = 0
             i = i + 1
-        coastb: "list[int]" = []
         i = 0
         while i < len(self.boxx):
-            coastb.append(self.entered_ice_box(i))
+            c = self.entered_ice_box(i)
+            self.slide_bx.append(c)
+            if c == 1:
+                anyc = 1
+                self._mark_box_coast(i)
             i = i + 1
-        coastm: "list[int]" = []
         i = 0
         while i < len(self.bombx):
-            coastm.append(self.entered_ice_bomb(i))
+            c = self.entered_ice_bomb(i)
+            self.slide_bm.append(c)
+            if c == 1:
+                anyc = 1
+                self._mark_bomb_coast(i)
             i = i + 1
-        steps = 0
-        while steps < 2000:
-            moved = 0
-            # phase A: snakes (active first)
-            order = 0
-            while order < self.nsnakes:
-                si = self.active + order
-                if si >= self.nsnakes:
-                    si = si - self.nsnakes
-                if si < len(coasts):
-                    if coasts[si] == 1:
-                        if self.snake_on_ice(si) == 1:
-                            if self.slide_snake(si, dx, dy) == 1:
+        if anyc == 0:
+            return 0
+        self.slide_on = 1
+        self.slide_dx = dx
+        self.slide_dy = dy
+        self.turn_pending = 1
+        return 1
+
+    def slide_entities_ready(self) -> int:
+        """1 when every in-flight slide entity has reached its logical cell.
+
+        Includes objects that were pushed (no coast flag) whose sprites are
+        still catching up via push_contact — otherwise the next slide_tick
+        would fire while the snake is still one cell away from the box.
+        """
+        arrive = 8
+        si = 0
+        while si < self.nsnakes:
+            want = 0
+            if si < len(self.slide_sn):
+                if self.slide_sn[si] == 1:
+                    want = 1
+            if si < len(self.snake_coast):
+                if self.snake_coast[si] == 1:
+                    want = 1
+            if want == 1:
+                s = self.snake(si)
+                if s.gone == 0:
+                    j = 0
+                    n = s.npart()
+                    while j < n:
+                        if j < len(s.vx):
+                            if s.phase == 0:
+                                if j < len(s.mx):
+                                    tx = s.mx[j] * 256
+                                    ty = s.my[j] * 256
+                                else:
+                                    tx = s.xs[j] * 256
+                                    ty = s.ys[j] * 256
+                            else:
+                                tx = s.xs[j] * 256
+                                ty = s.ys[j] * 256
+                            if self._manhattan256(s.vx[j], s.vy[j],
+                                                  tx, ty) > arrive:
+                                return 0
+                        j = j + 1
+            si = si + 1
+        i = 0
+        while i < len(self.boxx):
+            if self.boxlive[i] == 1:
+                if i < len(self.boxvx):
+                    if self._manhattan256(self.boxvx[i], self.boxvy[i],
+                                          self.boxx[i] * 256,
+                                          self.boxy[i] * 256) > arrive:
+                        return 0
+            i = i + 1
+        i = 0
+        while i < len(self.bombx):
+            if self.bomblive[i] == 1:
+                if i < len(self.bombvx):
+                    if self._manhattan256(self.bombvx[i], self.bombvy[i],
+                                          self.bombx[i] * 256,
+                                          self.bomby[i] * 256) > arrive:
+                        return 0
+            i = i + 1
+        return 1
+
+    def slide_tick(self) -> int:
+        """One cell of propel for every still-coasting entity. 1 if anyone moved."""
+        dx = self.slide_dx
+        dy = self.slide_dy
+        self.in_slides = 1
+        moved = 0
+        order = 0
+        while order < self.nsnakes:
+            si = self.active + order
+            if si >= self.nsnakes:
+                si = si - self.nsnakes
+            if si < len(self.slide_sn):
+                if self.slide_sn[si] == 1:
+                    if self.snake_on_ice(si) == 1:
+                        if self.slide_snake(si, dx, dy) == 1:
+                            moved = 1
+                            self.snake(si).phase = 1
+                            self.resolve_portals()
+                            self.flush_bombs()
+                    else:
+                        self.slide_sn[si] = 0
+            order = order + 1
+        bi = 0
+        while bi < len(self.boxx):
+            if bi < len(self.slide_bx):
+                if self.slide_bx[bi] == 1:
+                    if self.boxlive[bi] == 1:
+                        if self.ice_at(self.boxx[bi], self.boxy[bi],
+                                       self.boxz[bi]) == 1:
+                            if self.slide_object(bi, -1, dx, dy) == 1:
                                 moved = 1
                                 self.resolve_portals()
                                 self.flush_bombs()
-                                # Pit death waits until propel for this snake
-                                # stops (force check after resolve_slides).
                         else:
-                            coasts[si] = 0
-                order = order + 1
-            # phase B: boxes and bombs that entered a new zone this turn
-            bi = 0
-            while bi < len(self.boxx):
-                if bi < len(coastb):
-                    if coastb[bi] == 1:
-                        if self.boxlive[bi] == 1:
-                            if self.ice_at(self.boxx[bi], self.boxy[bi],
-                                           self.boxz[bi]) == 1:
-                                if self.slide_object(bi, -1, dx, dy) == 1:
-                                    moved = 1
-                                    self.resolve_portals()
-                                    self.flush_bombs()
-                            else:
-                                coastb[bi] = 0
+                            self.slide_bx[bi] = 0
+                    else:
+                        self.slide_bx[bi] = 0
+            bi = bi + 1
+        bi = 0
+        while bi < len(self.bombx):
+            if bi < len(self.slide_bm):
+                if self.slide_bm[bi] == 1:
+                    if self.bomblive[bi] == 1:
+                        if self.ice_at(self.bombx[bi], self.bomby[bi], 0) == 1:
+                            if self.slide_object(-1, bi, dx, dy) == 1:
+                                moved = 1
+                                self.resolve_portals()
+                                self.flush_bombs()
                         else:
-                            coastb[bi] = 0
-                bi = bi + 1
-            bi = 0
-            while bi < len(self.bombx):
-                if bi < len(coastm):
-                    if coastm[bi] == 1:
-                        if self.bomblive[bi] == 1:
-                            if self.ice_at(self.bombx[bi], self.bomby[bi],
-                                           0) == 1:
-                                if self.slide_object(-1, bi, dx, dy) == 1:
-                                    moved = 1
-                                    self.resolve_portals()
-                                    self.flush_bombs()
-                            else:
-                                coastm[bi] = 0
-                        else:
-                            coastm[bi] = 0
-                bi = bi + 1
-            # a push may have dropped someone onto a new zone — let them coast
-            i = 0
-            while i < self.nsnakes:
-                if i < len(coasts):
-                    if coasts[i] == 0:
-                        if self.entered_ice_snake(i) == 1:
-                            coasts[i] = 1
-                            moved = 1
-                i = i + 1
-            i = 0
-            while i < len(self.boxx):
-                if i < len(coastb):
-                    if coastb[i] == 0:
-                        if self.entered_ice_box(i) == 1:
-                            coastb[i] = 1
-                            moved = 1
-                i = i + 1
-            i = 0
-            while i < len(self.bombx):
-                if i < len(coastm):
-                    if coastm[i] == 0:
-                        if self.entered_ice_bomb(i) == 1:
-                            coastm[i] = 1
-                            moved = 1
-                i = i + 1
-            if moved == 0:
+                            self.slide_bm[bi] = 0
+                    else:
+                        self.slide_bm[bi] = 0
+            bi = bi + 1
+        i = 0
+        while i < self.nsnakes:
+            if i < len(self.slide_sn):
+                if self.slide_sn[i] == 0:
+                    if self.entered_ice_snake(i) == 1:
+                        self.slide_sn[i] = 1
+                        self._mark_snake_coast(i)
+                        self.snake(i).phase = 1
+                        moved = 1
+            i = i + 1
+        i = 0
+        while i < len(self.boxx):
+            if i < len(self.slide_bx):
+                if self.slide_bx[i] == 0:
+                    if self.entered_ice_box(i) == 1:
+                        self.slide_bx[i] = 1
+                        self._mark_box_coast(i)
+                        moved = 1
+            i = i + 1
+        i = 0
+        while i < len(self.bombx):
+            if i < len(self.slide_bm):
+                if self.slide_bm[i] == 0:
+                    if self.entered_ice_bomb(i) == 1:
+                        self.slide_bm[i] = 1
+                        self._mark_bomb_coast(i)
+                        moved = 1
+            i = i + 1
+        self.in_slides = 0
+        # Snakes that left ice may now fall; still-skating ones stay alive.
+        self.check_pits(0)
+        return moved
+
+    def clear_slide_state(self) -> None:
+        self.slide_on = 0
+        self.turn_pending = 0
+        self.in_slides = 0
+        self.slide_sn = []
+        self.slide_bx = []
+        self.slide_bm = []
+        self._clear_push_couples()
+
+    def finish_turn_after_slides(self) -> None:
+        """End-of-turn bookkeeping deferred until gradual propel finishes."""
+        self.slide_on = 0
+        self.turn_pending = 0
+        self._clear_push_couples()
+        # Wall-stop / end of propel: die even if still on ice over shallow.
+        self.check_pits(1)
+        self.resolve_portals()
+        self.flush_bombs()
+        self.update_pads()
+        saved = 0
+        loaded = 0
+        i = 0
+        while i < len(self.connx):
+            t = self.conntype[i]
+            if t >= 2:
+                if self.solid_on(self.connx[i], self.conny[i]) == 1:
+                    if t == 2:
+                        saved = 1
+                    else:
+                        loaded = 1
+            i = i + 1
+        if saved == 1:
+            self.ser()
+            self._copybuf(0, 4)
+            _log("[game] checkpoint saved")
+        elif loaded == 1:
+            if len(self.chkdata) > 0:
+                _log("[game] checkpoint loaded")
+                self._copybuf(4, 1)
+                self.apply_checkpoint()
+        self.update_traps_arming()
+        self.update_swarms()
+        self.check_pits(1)
+        self.update_stars()
+        self.update_traps_turn_end()
+        self.update_pads()
+        self.ser()
+        if self._bufs_equal(2, 0) == 1:
+            self.turn = self.turn - 1
+            return
+        self._hist_push(0, 2, 3)
+        self.rhist = []
+        self.rhistlen = []
+        self.dirty = 1
+        _log("[game] turn " + str(self.turn))
+
+    def resolve_slides(self, dx: int, dy: int) -> None:
+        """Legacy full resolve — unused; slides run gradually via slide_tick."""
+        if self.begin_slides(dx, dy) == 0:
+            return
+        steps = 0
+        while steps < 2000:
+            if self.slide_tick() == 0:
+                self.slide_on = 0
+                self.turn_pending = 0
                 return
             steps = steps + 1
+        self.slide_on = 0
+        self.turn_pending = 0
 
     # ------------------------------------------------------------- pits etc.
 
@@ -2472,31 +2796,52 @@ class Game:
         """Kill a snake fully over pits.
 
         Shallow: corpse stays at surface (alive=0, gone=0) — still drawn with
-        dead eyes/tongue, still pushable. Deep/bottomless: parts sink and the
-        snake is hidden when every part left the surface.
+        dead eyes/tongue, still pushable. If ANY part is over shallow, the
+        whole snake stays as a surface corpse (no parts sunk/removed).
+        Deep/bottomless only: parts sink and the snake is hidden when every
+        part left the surface.
         """
         s = self.snake(si)
         s.alive = 0
-        allgone = 1
+        any_shallow = 0
+        j = 0
+        while j < s.npart():
+            if self.pit_open_at(s.xs[j], s.ys[j]) == 1:
+                any_shallow = 1
+            j = j + 1
+        if any_shallow == 1:
+            # Mixed or all-shallow: keep every part on the surface.
+            _log("[game] snake fell into a pit")
+            if si == self.active:
+                # Defer switch until sprites finish the move so the snake
+                # still looks alive (pulse + eyes) while crawling.
+                switch = 1
+                if self._snake_vis_arrived(si) == 0:
+                    switch = 0
+                if switch == 1:
+                    self.auto_switch()
+            return
         j = 0
         while j < s.npart():
             t = self.pit_open_at(s.xs[j], s.ys[j])
             i = self.idx(s.xs[j], s.ys[j])
-            if t == 1:
-                # shallow: the corpse stays at the surface, solid terrain
-                allgone = 0
-            elif t == 2:                    # deep: fills the pit
+            if t == 2:                      # deep: fills the pit
                 self.filled[i] = 1
                 self.fillbox[i] = -1
                 s.zs[j] = 2
             else:                           # bottomless
                 s.zs[j] = 2
             j = j + 1
-        if allgone == 1:
-            s.gone = 1
+        s.gone = 1
         _log("[game] snake fell into a pit")
         if si == self.active:
-            self.auto_switch()
+            # Deep fall: keep this snake active so its brightness pulse
+            # continues while sprites crawl onto the pits; switch after.
+            switch = 1
+            if self._snake_vis_arrived(si) == 0:
+                switch = 0
+            if switch == 1:
+                self.auto_switch()
 
     def update_swarms(self) -> None:
         si = 0
@@ -2657,8 +3002,16 @@ class Game:
         self.flush_bombs()                  # end-of-move blasts (pit bombs)
         # Mid Move/ResolveSlides: skate over pits while riding propel ice.
         self.check_pits(0)
-        self.resolve_slides(dx, dy)
-        # Propel finished: die even if still on ice (wall-stop over shallow).
+        # Remember post-crawl pose so visuals finish the turn before propel.
+        si = 0
+        while si < self.nsnakes:
+            self.snake(si).capture_mid()
+            si = si + 1
+        if self.begin_slides(dx, dy) == 1:
+            # Gradual propel: slide_tick from animate; finish_turn later.
+            self.dirty = 1
+            return
+        # No propel this turn — settle immediately.
         self.check_pits(1)
         self.resolve_portals()
         self.flush_bombs()
@@ -2705,6 +3058,16 @@ class Game:
     def do_undo(self) -> None:
         if self.winning == 1:
             return
+        if self.turn_pending == 1:
+            # Abort in-progress gradual propel and restore pre-move state.
+            self.pend_move = 0
+            self.clear_slide_state()
+            self._copybuf(2, 1)
+            self.apply_buf()
+            self.turn = self.turn - 1
+            self.dirty = 1
+            _log("[game] undo (abort propel)")
+            return
         if len(self.histlen) == 0:
             return
         self.ser()
@@ -2714,6 +3077,8 @@ class Game:
 
     def do_redo(self) -> None:
         if self.winning == 1:
+            return
+        if self.turn_pending == 1:
             return
         if len(self.rhistlen) == 0:
             return
@@ -2725,6 +3090,8 @@ class Game:
     def do_reset(self) -> None:
         if self.winning == 1:
             return
+        self.pend_move = 0
+        self.clear_slide_state()
         self.ser()
         self._hist_push(0, 0, 4)
         self.rhist = []
@@ -2952,6 +3319,23 @@ class Game:
             return ly
         return self._vis_cell(self.boxvy[bi] + (ly - self.boxy[bi]) * 256)
 
+    def conn_carrier_hidden(self, bi: int) -> int:
+        """1 if a connectable anchored to box bi should stay hidden.
+
+        Carriers lost to the void, or finished sinking into a deep pit, take
+        their portals / save / load / propel zones with them. During the
+        crawl into the pit the zone still rides the sprite.
+        """
+        if bi < 0:
+            return 0
+        if bi >= len(self.boxx):
+            return 1
+        if self.boxlive[bi] == 0:
+            return 1
+        if self.boxz[bi] > 0:
+            return self._box_vis_arrived(bi)
+        return 0
+
     def draw_connectable_line(self, zx: int, zy: int, bi: int,
                               rgb: int) -> None:
         """Zone/portal → box/bomb line; alpha matches line.startColor.a."""
@@ -2959,7 +3343,7 @@ class Game:
             return
         if bi >= len(self.boxx):
             return
-        if self.boxlive[bi] == 0:
+        if self.conn_carrier_hidden(bi) == 1:
             return
         cell = self.cell
         x0 = self.conn_draw_px(zx, zy, bi) + cell // 2
@@ -2970,7 +3354,11 @@ class Game:
         self.draw_dotted_line(x0, y0, x1, y1, rgb, 64)
 
     def draw_board(self, tms: int) -> None:
-        # static layer from the scene cache, animated entities on top
+        # static layer from the scene cache, animated entities on top.
+        # A box may already have filled a pit in logic while its sprite is
+        # still crawling onto the cell — keep rebaking so the fill art waits.
+        if self._any_sinking_fill() == 1:
+            self.dirty = 1
         if self.dirty == 1:
             self.draw_board_static()
             engine.bake()
@@ -2978,6 +3366,68 @@ class Game:
         else:
             engine.restore()
         self.draw_board_dynamic(tms)
+
+    def _box_vis_arrived(self, bi: int) -> int:
+        """1 if box bi's sprite is on its logical cell."""
+        if bi < 0:
+            return 1
+        if bi >= len(self.boxvx):
+            return 1
+        if self._manhattan256(self.boxvx[bi], self.boxvy[bi],
+                              self.boxx[bi] * 256,
+                              self.boxy[bi] * 256) <= 8:
+            return 1
+        return 0
+
+    def _snake_vis_arrived(self, si: int) -> int:
+        """1 if every part of snake si is visually on its logical cell."""
+        s = self.snake(si)
+        j = 0
+        n = s.npart()
+        while j < n:
+            if j < len(s.vx):
+                if self._manhattan256(s.vx[j], s.vy[j],
+                                      s.xs[j] * 256, s.ys[j] * 256) > 8:
+                    return 0
+            j = j + 1
+        return 1
+
+    def _fill_visually_ready(self, i: int) -> int:
+        """1 if filled[i] should draw fill art (filler sprite has arrived)."""
+        if self.filled[i] == 0:
+            return 0
+        bi = self.fillbox[i]
+        if bi >= 0:
+            return self._box_vis_arrived(bi)
+        # Snake-filled pit (fillsbox=-1): wait until every fallen snake that
+        # covers this cell has finished crawling onto it.
+        x = self.minx + i - (i // self.gw) * self.gw
+        y = self.miny + i // self.gw
+        si = 0
+        while si < self.nsnakes:
+            s = self.snake(si)
+            if s.alive == 0:
+                j = 0
+                n = s.npart()
+                while j < n:
+                    if s.xs[j] == x:
+                        if s.ys[j] == y:
+                            if self._snake_vis_arrived(si) == 0:
+                                return 0
+                    j = j + 1
+            si = si + 1
+        return 1
+
+    def _any_sinking_fill(self) -> int:
+        """1 if some logical fill is waiting on its filler sprite to arrive."""
+        i = 0
+        n = len(self.filled)
+        while i < n:
+            if self.filled[i] == 1:
+                if self._fill_visually_ready(i) == 0:
+                    return 1
+            i = i + 1
+        return 0
 
     def draw_board_static(self) -> None:
         cell = self.cell
@@ -3005,7 +3455,7 @@ class Game:
                 px = self.cell_px(x)
                 py = self.cell_py(y)
                 if self.pit[i] > 0:
-                    if self.filled[i] == 1:
+                    if self._fill_visually_ready(i) == 1:
                         engine.rect_a(px, py, cell, cell, 4139348, 120)
                         if self.fillbox[i] >= 0:
                             bi = self.fillbox[i]
@@ -3084,8 +3534,9 @@ class Game:
             vx = self.conn_vis_cell(self.porx[i], self.pory[i], bi, 0)
             vy = self.conn_vis_cell(self.porx[i], self.pory[i], bi, 1)
             if self.in_wall_or_door(vx, vy) == 0:
-                self.draw_connectable_line(self.porx[i], self.pory[i],
-                                           bi, 65535)
+                if self.conn_carrier_hidden(bi) == 0:
+                    self.draw_connectable_line(self.porx[i], self.pory[i],
+                                               bi, 65535)
             i = i + 1
         # rotating portal sprites (order 250), prefab scale 0.9
         i = 0
@@ -3094,10 +3545,14 @@ class Game:
             vx = self.conn_vis_cell(self.porx[i], self.pory[i], bi, 0)
             vy = self.conn_vis_cell(self.porx[i], self.pory[i], bi, 1)
             if self.in_wall_or_door(vx, vy) == 0:
-                self.cspr_ex(engine.SPR_PORTAL,
-                             self.conn_draw_px(self.porx[i], self.pory[i], bi),
-                             self.conn_draw_py(self.porx[i], self.pory[i], bi),
-                             230, 230, self.porcol[i], 256, (tms // 300) & 3)
+                if self.conn_carrier_hidden(bi) == 0:
+                    self.cspr_ex(engine.SPR_PORTAL,
+                                 self.conn_draw_px(self.porx[i], self.pory[i],
+                                                   bi),
+                                 self.conn_draw_py(self.porx[i], self.pory[i],
+                                                   bi),
+                                 230, 230, self.porcol[i], 256,
+                                 (tms // 300) & 3)
             i = i + 1
         # apple (275) then boxes/bombs (300) -- above portals, below snakes.
         # Kept out of the static bake so rotating portals stay underneath.
@@ -3114,20 +3569,32 @@ class Game:
             vx = self.conn_vis_cell(self.connx[i], self.conny[i], bi, 0)
             vy = self.conn_vis_cell(self.connx[i], self.conny[i], bi, 1)
             if self.in_wall_or_door(vx, vy) == 0:
-                if t == 1:
-                    self.draw_connectable_line(self.connx[i], self.conny[i],
-                                               bi, 16744703)
-                if t == 2:
-                    self.draw_connectable_line(self.connx[i], self.conny[i],
-                                               bi, 255)
-                if t == 3:
-                    self.draw_connectable_line(self.connx[i], self.conny[i],
-                                               bi, 16744448)
+                if self.conn_carrier_hidden(bi) == 0:
+                    if t == 1:
+                        self.draw_connectable_line(self.connx[i],
+                                                   self.conny[i], bi, 16744703)
+                    if t == 2:
+                        self.draw_connectable_line(self.connx[i],
+                                                   self.conny[i], bi, 255)
+                    if t == 3:
+                        self.draw_connectable_line(self.connx[i],
+                                                   self.conny[i], bi, 16744448)
             i = i + 1
         i = 0
         while i < len(self.boxx):
             if self.boxlive[i] == 1:
+                # Keep drawing a sinking box until its sprite reaches the pit
+                # (logical fill may already have set boxz) so it crawls in
+                # instead of vanishing one cell away.
+                show = 0
                 if self.boxz[i] == 0:
+                    show = 1
+                elif i < len(self.boxvx):
+                    if self._manhattan256(self.boxvx[i], self.boxvy[i],
+                                          self.boxx[i] * 256,
+                                          self.boxy[i] * 256) > 8:
+                        show = 1
+                if show == 1:
                     # Box prefab: 244x236 art at 244 ppu, scale 0.7
                     bpx = self.ox + (self.boxvx[i] * cell) // 256
                     bpy = self.oy - (self.boxvy[i] * cell) // 256
@@ -3166,12 +3633,14 @@ class Game:
                 vx = self.conn_vis_cell(self.connx[i], self.conny[i], bi, 0)
                 vy = self.conn_vis_cell(self.connx[i], self.conny[i], bi, 1)
                 if self.in_wall_or_door(vx, vy) == 0:
-                    # Propel Zone prefab: square art, scale 0.97
-                    self.cspr(engine.SPR_PROPEL,
-                              self.conn_draw_px(self.connx[i], self.conny[i],
-                                                bi),
-                              self.conn_draw_py(self.connx[i], self.conny[i],
-                                                bi), 248, 248)
+                    if self.conn_carrier_hidden(bi) == 0:
+                        # Propel Zone prefab: square art, scale 0.97
+                        self.cspr(engine.SPR_PROPEL,
+                                  self.conn_draw_px(self.connx[i],
+                                                    self.conny[i], bi),
+                                  self.conn_draw_py(self.connx[i],
+                                                    self.conny[i], bi),
+                                  248, 248)
             i = i + 1
         i = 0
         while i < len(self.swarmx):
@@ -3199,20 +3668,23 @@ class Game:
             vx = self.conn_vis_cell(self.connx[i], self.conny[i], bi, 0)
             vy = self.conn_vis_cell(self.connx[i], self.conny[i], bi, 1)
             if self.in_wall_or_door(vx, vy) == 0:
-                if t == 2:
-                    # Save Icon: 340x393 at 393 ppu, zone scale 0.97
-                    self.cspr(engine.SPR_SAVE,
-                              self.conn_draw_px(self.connx[i], self.conny[i],
-                                                bi),
-                              self.conn_draw_py(self.connx[i], self.conny[i],
-                                                bi), 215, 248)
-                if t == 3:
-                    # Load Icon: 176x86 at 176 ppu, zone scale 0.97
-                    self.cspr(engine.SPR_LOAD,
-                              self.conn_draw_px(self.connx[i], self.conny[i],
-                                                bi),
-                              self.conn_draw_py(self.connx[i], self.conny[i],
-                                                bi), 248, 121)
+                if self.conn_carrier_hidden(bi) == 0:
+                    if t == 2:
+                        # Save Icon: 340x393 at 393 ppu, zone scale 0.97
+                        self.cspr(engine.SPR_SAVE,
+                                  self.conn_draw_px(self.connx[i],
+                                                    self.conny[i], bi),
+                                  self.conn_draw_py(self.connx[i],
+                                                    self.conny[i], bi),
+                                  215, 248)
+                    if t == 3:
+                        # Load Icon: 176x86 at 176 ppu, zone scale 0.97
+                        self.cspr(engine.SPR_LOAD,
+                                  self.conn_draw_px(self.connx[i],
+                                                    self.conny[i], bi),
+                                  self.conn_draw_py(self.connx[i],
+                                                    self.conny[i], bi),
+                                  248, 121)
             i = i + 1
         i = 0
         while i < len(self.starx):
@@ -3250,15 +3722,25 @@ class Game:
 
     def draw_snake(self, si: int, tms: int) -> None:
         s = self.snake(si)
+        # Deep-pit death sets gone immediately; keep drawing until sprites
+        # finish crawling onto the pits so the fall is gradual.
         if s.gone == 1:
-            return
+            if self._snake_vis_arrived(si) == 1:
+                return
         # self.cell is an obj-typed field; cell_px returns a plain int.
         cell = self.cell_px(1) - self.cell_px(0)
         n = s.npart()
         col = s.colr * 65536 + s.colg * 256 + s.colb
         # Active snake pulses darkest → lightest → darkest, restarting at
         # darkest whenever it becomes active. Lightest is slightly below base.
+        # Keep pulsing through a pit-death crawl (alive is already 0 in logic).
+        pulsing = 0
         if s.alive == 1:
+            pulsing = 1
+        elif self._snake_vis_arrived(si) == 0:
+            if s.alive == 0:
+                pulsing = 1
+        if pulsing == 1:
             if si == self.active:
                 period = 1400
                 age = tms - self.activems
@@ -3287,16 +3769,28 @@ class Game:
         ox = self.cell_px(0) - 0           # force int screen origin
         oy = self.cell_py(0)
         # Pixel centres of surface / shallow-pit parts. Deep-gone parts are
-        # skipped so blast fragments do not drag a curve into the void.
+        # skipped once their sprite has arrived (blast void / sunk fill).
         # Write into preallocated sn_* scratch — no per-frame list allocs.
         m = 0
         j = 0
         while j < n:
+            show = 0
             if s.zs[j] < 2:
+                show = 1
+            elif j < len(s.vx):
+                if self._manhattan256(s.vx[j], s.vy[j],
+                                      s.xs[j] * 256, s.ys[j] * 256) > 8:
+                    show = 1
+            if show == 1:
                 if m < MAX_SN_DRAW:
                     self.sn_cx[m] = ox + (s.vx[j] * cell) // 256 + cell // 2
                     self.sn_cy[m] = oy - (s.vy[j] * cell) // 256 + cell // 2
+                    # Surface color while still crawling into a deep pit;
+                    # zs>=2 only darkens after the sprite has arrived (and
+                    # those parts are then hidden anyway).
                     self.sn_cz[m] = s.zs[j]
+                    if self.sn_cz[m] >= 2:
+                        self.sn_cz[m] = 0
                     m = m + 1
             j = j + 1
         if m == 0:
@@ -3430,7 +3924,13 @@ class Game:
         # face (only while the original head part survives: headless
         # corpses and fragments from a bomb blast show no eyes)
         if n > 0:
+            face = 0
             if s.zs[0] < 2:
+                face = 1
+            elif self._snake_vis_arrived(si) == 0:
+                # Deep fall in progress: keep the face until sprites arrive.
+                face = 1
+            if face == 1:
                 if s.hashead == 0:
                     return
                 hx = ox + (s.vx[0] * cell) // 256
@@ -3442,7 +3942,14 @@ class Game:
                     rot = 1
                 elif s.fdy == -1:
                     rot = 2
+                # Dead eyes only once the corpse has finished crawling onto
+                # the pits; during the move it still looks alive.
+                deadface = 0
                 if s.alive == 0:
+                    if s.gone == 0:
+                        if self._snake_vis_arrived(si) == 1:
+                            deadface = 1
+                if deadface == 1:
                     ds = br * 8 // 5            # ~0.8 × prior 2*br
                     if ds < 8:
                         ds = 8
@@ -3543,6 +4050,18 @@ class Game:
                 self.box_warp.append(0)
                 self.box_wdx.append(0)
                 self.box_wdy.append(0)
+            if i < len(self.box_coast):
+                self.box_coast[i] = 0
+            else:
+                self.box_coast.append(0)
+            if i < len(self.box_coupled):
+                self.box_coupled[i] = 0
+            else:
+                self.box_coupled.append(0)
+            if i < len(self.box_land_pend):
+                self.box_land_pend[i] = 0
+            else:
+                self.box_land_pend.append(0)
             i = i + 1
         while len(self.boxvx) > len(self.boxx):
             self.boxvx.pop()
@@ -3551,6 +4070,12 @@ class Game:
             self.box_warp.pop()
             self.box_wdx.pop()
             self.box_wdy.pop()
+        while len(self.box_coast) > len(self.boxx):
+            self.box_coast.pop()
+        while len(self.box_coupled) > len(self.boxx):
+            self.box_coupled.pop()
+        while len(self.box_land_pend) > len(self.boxx):
+            self.box_land_pend.pop()
         i = 0
         n = len(self.bombx)
         while i < n:
@@ -3568,6 +4093,18 @@ class Game:
                 self.bomb_warp.append(0)
                 self.bomb_wdx.append(0)
                 self.bomb_wdy.append(0)
+            if i < len(self.bomb_coast):
+                self.bomb_coast[i] = 0
+            else:
+                self.bomb_coast.append(0)
+            if i < len(self.bomb_coupled):
+                self.bomb_coupled[i] = 0
+            else:
+                self.bomb_coupled.append(0)
+            if i < len(self.bomb_land_pend):
+                self.bomb_land_pend[i] = 0
+            else:
+                self.bomb_land_pend.append(0)
             i = i + 1
         while len(self.bombvx) > len(self.bombx):
             self.bombvx.pop()
@@ -3576,6 +4113,21 @@ class Game:
             self.bomb_warp.pop()
             self.bomb_wdx.pop()
             self.bomb_wdy.pop()
+        while len(self.bomb_coast) > len(self.bombx):
+            self.bomb_coast.pop()
+        while len(self.bomb_coupled) > len(self.bombx):
+            self.bomb_coupled.pop()
+        while len(self.bomb_land_pend) > len(self.bombx):
+            self.bomb_land_pend.pop()
+        si = 0
+        while si < self.nsnakes:
+            if si < len(self.snake_coast):
+                self.snake_coast[si] = 0
+            else:
+                self.snake_coast.append(0)
+            si = si + 1
+        self.pend_move = 0
+        self.clear_slide_state()
 
     def _vis_cell(self, v: int) -> int:
         """Nearest cell index for a 1/256 visual coordinate."""
@@ -3594,12 +4146,12 @@ class Game:
 
     def push_contact_ready(self, vx: int, vy: int, self_box: int,
                            self_bomb: int) -> int:
-        """1 if the pusher has visually touched this object.
+        """1 if a pusher has visually touched this object.
 
-        A pushed box/bomb stays put until the entity crawling onto its
-        visual cell reaches sprite-contact distance (edge hit, not cell
-        centre), then slides at crawl speed. self_box/self_bomb skip this
-        object so it cannot freeze itself mid-slide.
+        A pushed box/bomb stays put until something crawling onto its
+        visual cell reaches sprite-contact distance, then coasts with the
+        pusher. Returns 0 when nothing is on the cell yet (do not free-run).
+        self_box/self_bomb skip this object so it cannot freeze itself.
         """
         cx = self._vis_cell(vx)
         cy = self._vis_cell(vy)
@@ -3620,8 +4172,8 @@ class Game:
                             if len(s.vx) > 0:
                                 hit = obj_r + snake_r
                                 if self._manhattan256(s.vx[0], s.vy[0],
-                                                      vx, vy) > hit:
-                                    return 0
+                                                      vx, vy) <= hit:
+                                    return 1
             si = si + 1
         i = 0
         while i < len(self.boxx):
@@ -3633,8 +4185,8 @@ class Game:
                                 hit = obj_r + box_r
                                 if self._manhattan256(self.boxvx[i],
                                                       self.boxvy[i],
-                                                      vx, vy) > hit:
-                                    return 0
+                                                      vx, vy) <= hit:
+                                    return 1
             i = i + 1
         i = 0
         while i < len(self.bombx):
@@ -3646,10 +4198,10 @@ class Game:
                                 hit = obj_r + bomb_r
                                 if self._manhattan256(self.bombvx[i],
                                                       self.bombvy[i],
-                                                      vx, vy) > hit:
-                                    return 0
+                                                      vx, vy) <= hit:
+                                    return 1
             i = i + 1
-        return 1
+        return 0
 
     def animate(self, dtms: int) -> None:
         step = (dtms * 256) // CRAWL_MS     # 1 cell per CRAWL_MS
@@ -3657,24 +4209,49 @@ class Game:
         si = 0
         while si < self.nsnakes:
             s = self.snake(si)
+            falling = 0
+            if s.alive == 0:
+                if self._snake_vis_arrived(si) == 0:
+                    falling = 1
             j = 0
             n = s.npart()
             while j < n:
                 if j < len(s.vx):
                     # Portal warp: finish crawling onto the entry cell first.
+                    # Propel: phase 0 crawls to mid (post-turn), then phase 1
+                    # to the final propel cells — so a 2-cell turn never
+                    # collapses into one dot on the way to the coast end.
                     tx = s.xs[j] * 256
                     ty = s.ys[j] * 256
+                    coasting = 0
+                    if si < len(self.snake_coast):
+                        if self.snake_coast[si] == 1:
+                            coasting = 1
                     if s.warp == 1:
                         tx = (s.xs[j] - s.wdx) * 256
                         ty = (s.ys[j] - s.wdy) * 256
+                    elif coasting == 1:
+                        if s.phase == 0:
+                            if j < len(s.mx):
+                                tx = s.mx[j] * 256
+                                ty = s.my[j] * 256
                     vx = s.vx[j]
                     vy = s.vy[j]
                     ddx = tx - vx
                     if s.warp == 0:
-                        if ddx > 512:
-                            vx = tx
-                        elif ddx < -512:
-                            vx = tx
+                        # Propel coasts crawl cell-by-cell; do not snap when
+                        # the logical target is more than two cells away.
+                        if coasting == 0:
+                            if ddx > 512:
+                                vx = tx
+                            elif ddx < -512:
+                                vx = tx
+                            elif ddx > step:
+                                vx = vx + step
+                            elif ddx < 0 - step:
+                                vx = vx - step
+                            else:
+                                vx = tx
                         elif ddx > step:
                             vx = vx + step
                         elif ddx < 0 - step:
@@ -3689,10 +4266,17 @@ class Game:
                         vx = tx
                     ddy = ty - vy
                     if s.warp == 0:
-                        if ddy > 512:
-                            vy = ty
-                        elif ddy < -512:
-                            vy = ty
+                        if coasting == 0:
+                            if ddy > 512:
+                                vy = ty
+                            elif ddy < -512:
+                                vy = ty
+                            elif ddy > step:
+                                vy = vy + step
+                            elif ddy < 0 - step:
+                                vy = vy - step
+                            else:
+                                vy = ty
                         elif ddy > step:
                             vy = vy + step
                         elif ddy < 0 - step:
@@ -3721,8 +4305,40 @@ class Game:
                     j = j + 1
                 if done == 1:
                     s.snap_visual()
+            elif si < len(self.snake_coast):
+                if self.snake_coast[si] == 1:
+                    done = 1
+                    j = 0
+                    while j < n:
+                        if j < len(s.vx):
+                            if s.phase == 0:
+                                if j < len(s.mx):
+                                    tx = s.mx[j] * 256
+                                    ty = s.my[j] * 256
+                                else:
+                                    tx = s.xs[j] * 256
+                                    ty = s.ys[j] * 256
+                            else:
+                                tx = s.xs[j] * 256
+                                ty = s.ys[j] * 256
+                            if self._manhattan256(s.vx[j], s.vy[j],
+                                                  tx, ty) > arrive:
+                                done = 0
+                        j = j + 1
+                    if done == 1:
+                        if s.phase == 0:
+                            s.phase = 1
+                        else:
+                            self.snake_coast[si] = 0
+            # After a pit-death crawl: bake fills (deep) and hand off active.
+            if falling == 1:
+                if self._snake_vis_arrived(si) == 1:
+                    if s.gone == 1:
+                        self.dirty = 1
+                    if si == self.active:
+                        self.auto_switch()
             si = si + 1
-        # Boxes/bombs: portal warp, else wait for pusher contact then crawl.
+        # Boxes/bombs: portal warp, propel coast, or wait for pusher contact.
         i = 0
         while i < len(self.boxx):
             if self.boxlive[i] == 1:
@@ -3735,6 +4351,10 @@ class Game:
                             warping = 1
                             tx = (self.boxx[i] - self.box_wdx[i]) * 256
                             ty = (self.boxy[i] - self.box_wdy[i]) * 256
+                    coasting = 0
+                    if i < len(self.box_coast):
+                        if self.box_coast[i] == 1:
+                            coasting = 1
                     vx = self.boxvx[i]
                     vy = self.boxvy[i]
                     ddx = tx - vx
@@ -3742,6 +4362,15 @@ class Game:
                     move = 0
                     if warping == 1:
                         move = 1
+                    elif coasting == 1:
+                        move = 1
+                    elif self.slide_on == 1:
+                        # During gradual propel: never snap; wait for contact
+                        # so pushed objects start only when the snake hits them.
+                        if self.push_contact_ready(vx, vy, i, -1) == 1:
+                            move = 1
+                            self._mark_box_coupled(i)
+                            coasting = 1
                     elif ddx > 512:
                         vx = tx
                         vy = ty
@@ -3756,6 +4385,9 @@ class Game:
                         vy = ty
                     elif self.push_contact_ready(vx, vy, i, -1) == 1:
                         move = 1
+                        # Stick with the pusher for the rest of this cell.
+                        self._mark_box_coast(i)
+                        coasting = 1
                     if move == 1:
                         if ddx > step:
                             vx = vx + step
@@ -3778,6 +4410,16 @@ class Game:
                             self.box_warp[i] = 0
                             self.box_wdx[i] = 0
                             self.box_wdy[i] = 0
+                    elif self._manhattan256(vx, vy, self.boxx[i] * 256,
+                                            self.boxy[i] * 256) <= arrive:
+                        self.boxvx[i] = self.boxx[i] * 256
+                        self.boxvy[i] = self.boxy[i] * 256
+                        self._flush_box_land(i)
+                        if coasting == 1:
+                            self.box_coast[i] = 0
+                        # Bake fill art now that the sprite has arrived.
+                        if self.boxz[i] > 0:
+                            self.dirty = 1
             i = i + 1
         i = 0
         while i < len(self.bombx):
@@ -3791,6 +4433,10 @@ class Game:
                             warping = 1
                             tx = (self.bombx[i] - self.bomb_wdx[i]) * 256
                             ty = (self.bomby[i] - self.bomb_wdy[i]) * 256
+                    coasting = 0
+                    if i < len(self.bomb_coast):
+                        if self.bomb_coast[i] == 1:
+                            coasting = 1
                     vx = self.bombvx[i]
                     vy = self.bombvy[i]
                     ddx = tx - vx
@@ -3798,6 +4444,13 @@ class Game:
                     move = 0
                     if warping == 1:
                         move = 1
+                    elif coasting == 1:
+                        move = 1
+                    elif self.slide_on == 1:
+                        if self.push_contact_ready(vx, vy, -1, i) == 1:
+                            move = 1
+                            self._mark_bomb_coupled(i)
+                            coasting = 1
                     elif ddx > 512:
                         vx = tx
                         vy = ty
@@ -3812,6 +4465,8 @@ class Game:
                         vy = ty
                     elif self.push_contact_ready(vx, vy, -1, i) == 1:
                         move = 1
+                        self._mark_bomb_coast(i)
+                        coasting = 1
                     if move == 1:
                         if ddx > step:
                             vx = vx + step
@@ -3834,7 +4489,87 @@ class Game:
                             self.bomb_warp[i] = 0
                             self.bomb_wdx[i] = 0
                             self.bomb_wdy[i] = 0
+                    elif self._manhattan256(vx, vy, self.bombx[i] * 256,
+                                            self.bomby[i] * 256) <= arrive:
+                        self.bombvx[i] = self.bombx[i] * 256
+                        self.bombvy[i] = self.bomby[i] * 256
+                        self._flush_bomb_land(i)
+                        if coasting == 1:
+                            self.bomb_coast[i] = 0
             i = i + 1
+        if self.slide_on == 1:
+            if self.slide_entities_ready() == 1:
+                if self.slide_tick() == 0:
+                    self.finish_turn_after_slides()
+                else:
+                    self.dirty = 1
+        self.flush_pending_move()
+
+    def _any_obj_visual_lag(self) -> int:
+        """1 if any live box/bomb sprite has not reached its logical cell."""
+        arrive = 8
+        i = 0
+        while i < len(self.boxx):
+            if self.boxlive[i] == 1:
+                if i < len(self.boxvx):
+                    if self._manhattan256(self.boxvx[i], self.boxvy[i],
+                                          self.boxx[i] * 256,
+                                          self.boxy[i] * 256) > arrive:
+                        return 1
+            i = i + 1
+        i = 0
+        while i < len(self.bombx):
+            if self.bomblive[i] == 1:
+                if i < len(self.bombvx):
+                    if self._manhattan256(self.bombvx[i], self.bombvy[i],
+                                          self.bombx[i] * 256,
+                                          self.bomby[i] * 256) > arrive:
+                        return 1
+            i = i + 1
+        return 0
+
+    def snake_propel_busy(self, si: int) -> int:
+        """1 if snake si cannot take a new move yet.
+
+        Blocks during gradual propel and while the active snake or any
+        pushed box/bomb is still crawling — otherwise a second move can
+        start before the push animates and sprites overlap.
+        """
+        if self.slide_on == 1:
+            return 1
+        if self.turn_pending == 1:
+            return 1
+        if si >= 0:
+            if si < self.nsnakes:
+                if self._snake_vis_arrived(si) == 0:
+                    s = self.snake(si)
+                    if s.npart() > 0:
+                        return 1
+            if si < len(self.snake_coast):
+                if self.snake_coast[si] == 1:
+                    return 1
+        if self._any_obj_visual_lag() == 1:
+            return 1
+        return 0
+
+    def flush_pending_move(self) -> None:
+        """Apply a move queued while the active snake was mid-animation."""
+        if self.pend_move == 0:
+            return
+        if self.snake_propel_busy(self.active) == 1:
+            return
+        s = self.snake(self.active)
+        if s.gone == 1:
+            self.pend_move = 0
+            return
+        if s.alive == 0:
+            self.pend_move = 0
+            return
+        dx = self.pend_dx
+        dy = self.pend_dy
+        self.pend_move = 0
+        self.dirty = 1
+        self.do_move(dx, dy)
 
     # ------------------------------------------------------------- screens
 
@@ -3934,20 +4669,44 @@ class Game:
         if self.winning == 1:
             return
         if k == engine.K_UP:
-            self.do_move(0, 1)
+            if self.snake_propel_busy(self.active) == 1:
+                self.pend_dx = 0
+                self.pend_dy = 1
+                self.pend_move = 1
+            else:
+                self.do_move(0, 1)
         elif k == engine.K_DOWN:
-            self.do_move(0, -1)
+            if self.snake_propel_busy(self.active) == 1:
+                self.pend_dx = 0
+                self.pend_dy = -1
+                self.pend_move = 1
+            else:
+                self.do_move(0, -1)
         elif k == engine.K_LEFT:
-            self.do_move(-1, 0)
+            if self.snake_propel_busy(self.active) == 1:
+                self.pend_dx = -1
+                self.pend_dy = 0
+                self.pend_move = 1
+            else:
+                self.do_move(-1, 0)
         elif k == engine.K_RIGHT:
-            self.do_move(1, 0)
+            if self.snake_propel_busy(self.active) == 1:
+                self.pend_dx = 1
+                self.pend_dy = 0
+                self.pend_move = 1
+            else:
+                self.do_move(1, 0)
         elif k == engine.K_UNDO:
+            self.pend_move = 0
             self.do_undo()
         elif k == engine.K_REDO:
+            self.pend_move = 0
             self.do_redo()
         elif k == engine.K_RESET:
+            self.pend_move = 0
             self.do_reset()
         elif k == engine.K_SWITCH:
+            self.pend_move = 0
             self.do_switch()
         elif k == engine.K_GRID:
             self.gridon = 1 - self.gridon

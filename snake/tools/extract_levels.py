@@ -649,7 +649,7 @@ def solve(level_text, max_nodes=2000000):
 # Unity scene numbers (1-based filenames like 33.unity) to skip. Remake
 # level indices stay consecutive: after excluding 33 and 35 from 1..44,
 # the pack has 42 levels (Unity 34 → remake #33, Unity 36 → remake #34, …).
-EXCLUDE_LEVELS = frozenset([33, 35])
+EXCLUDE_LEVELS = frozenset([33, 35, 42])
 
 
 def main():

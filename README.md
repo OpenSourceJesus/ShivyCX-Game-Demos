@@ -11,5 +11,5 @@ linear framebuffer, QEMU `-kernel`).
 
 Each demo directory has its own README with build/run/test instructions;
 `make run` in the demo directory is all it takes (needs `gcc`,
-`qemu-system-x86_64`, `python3`, and ShivyC checked out as a sibling at
+`qemu-system-x86_64`, `python3`, and ShivyC (https://github.com/brentharts/ShivyC) checked out as a sibling at
 `~/ShivyC`).
