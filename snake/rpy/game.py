@@ -2165,35 +2165,49 @@ class Game:
             j = j + 1
         return -1
 
-    def resolve_portals(self) -> None:
-        """Teleport entities that newly entered a portal cell. Mirrors the
-        original Portal.HandleTeleports(): passes repeat while something
-        teleports, so an arrival standing on another pair's portal chains
-        onward in the same turn; a snake entering portals of two pairs at
-        once exits from all of them and the extra exits are clones."""
-        guard = 0
-        while guard < 16:
-            if self.portal_pass() == 0:
-                break
-            guard = guard + 1
-        # refresh occupancy + locks
+    def _refresh_pairlocks(self) -> None:
+        """Clear pair-lock when both ends are free of surface solids.
+
+        Uses live solid_on (not stale porocc). Call before teleport attempts
+        so a box that left an exit earlier this turn does not keep the pair
+        locked and falsely refuse a later push into the entry.
+        """
         n = len(self.porx)
-        pi = 0
-        while pi < n:
-            self.porocc[pi] = self.solid_on(self.porx[pi], self.pory[pi])
-            pi = pi + 1
         pi = 0
         while pi < len(self.pairlock):
             occ = 0
             j = 0
             while j < n:
                 if self.porpair[j] == pi:
-                    if self.porocc[j] == 1:
+                    if self.solid_on(self.porx[j], self.pory[j]) == 1:
                         occ = 1
                 j = j + 1
             if occ == 0:
                 self.pairlock[pi] = 0
             pi = pi + 1
+
+    def resolve_portals(self) -> None:
+        """Teleport entities that newly entered a portal cell. Mirrors the
+        original Portal.HandleTeleports(): passes repeat while something
+        teleports, so an arrival standing on another pair's portal chains
+        onward in the same turn; a snake entering portals of two pairs at
+        once exits from all of them and the extra exits are clones."""
+        # Drop locks vacated during move_active before any attempt. Do not
+        # refresh porocc here — that snapshot is "occupied last resolve" for
+        # fresh-entry detection.
+        self._refresh_pairlocks()
+        guard = 0
+        while guard < 16:
+            if self.portal_pass() == 0:
+                break
+            guard = guard + 1
+        # refresh occupancy + locks for the next turn's eligibility
+        n = len(self.porx)
+        pi = 0
+        while pi < n:
+            self.porocc[pi] = self.solid_on(self.porx[pi], self.pory[pi])
+            pi = pi + 1
+        self._refresh_pairlocks()
 
     def portal_eligible(self, pi: int) -> int:
         """Portal may fire: linked and freshly entered (cell was clear at
@@ -2246,32 +2260,18 @@ class Game:
             return 1
         if self.box_at(x, y) >= 0:
             return 1
-        i = 0
-        while i < len(self.boxx):
-            if self.boxlive[i] == 1:
-                if self.boxx[i] == x:
-                    if self.boxy[i] == y:
-                        if self.boxz[i] > 0:
-                            if self._box_vis_arrived(i) == 0:
-                                return 1
-            i = i + 1
+        # Mid-fall pit fillers: Unity keeps their colliders until Fill
+        # finishes. Once fill art is ready the filler is inactive — a portal
+        # on that filled pit must accept teleports with no indicators.
+        ci = self.idx(x, y)
+        if ci >= 0:
+            if self.filled[ci] == 1:
+                if self._fill_visually_ready(ci) == 0:
+                    return 1
         osnk = self.snake_at(x, y)
         if osnk >= 0:
             if osnk != ignore_snake:
                 return 1
-        si = 0
-        while si < self.nsnakes:
-            if si != ignore_snake:
-                s = self.snake(si)
-                if s.gone == 1:
-                    if self._snake_vis_arrived(si) == 0:
-                        j = 0
-                        while j < s.npart():
-                            if s.xs[j] == x:
-                                if s.ys[j] == y:
-                                    return 1
-                            j = j + 1
-            si = si + 1
         return 0
 
     def teleport_dest_blocked_at(self, x: int, y: int,
@@ -2396,8 +2396,8 @@ class Game:
             dxa = self.porx[oa] - self.porx[ea]
             dya = self.pory[oa] - self.pory[ea]
             if self.portal_dest_depth_blocks(oa) == 1:
+                # Unity DestinationPortalZProhibits: refuse without markers.
                 feasible = 0
-                self.mark_blocked(self.porx[oa], self.pory[oa])
             elif self.snake_fits(si, dxa, dya) == 0:
                 feasible = 0
                 self.mark_failed_teleport(si, oa, dxa, dya)
@@ -2422,10 +2422,7 @@ class Game:
         while a < len(self.entbuf):
             ea = self.entbuf[a]
             if self.pairlock[self.porpair[ea]] == 1:
-                oa = self.portal_other(ea)
-                self.mark_failed_teleport(si, oa,
-                                          self.porx[oa] - self.porx[ea],
-                                          self.pory[oa] - self.pory[ea])
+                # Unity TeleportLock: silent refuse.
                 if conj == 1:
                     return 2
                 return 0
@@ -2496,16 +2493,19 @@ class Game:
                     self.mark_blocked(tx, ty)
                 j = j + 1
         else:
-            # Box/bomb destination is the exit cell.
-            self.mark_blocked(ex, ey)
+            # Box/bomb: mark the exit only when that cell actually blocks
+            # (wall / apple / occupant). A clear exit — including a portal on
+            # a finished filled pit — must not get a marker.
+            if self.teleport_dest_blocked_at(ex, ey, -1) == 1:
+                self.mark_blocked(ex, ey)
 
     def try_teleport(self, pi: int, oi: int, px: int, py: int,
                      blockmask: int) -> int:
         dx = self.porx[oi] - px
         dy = self.pory[oi] - py
         if self.portal_dest_depth_blocks(oi) == 1:
-            # Sunk exit portal (filled-pit carrier): block and mark the exit.
-            self.mark_blocked(self.porx[oi], self.pory[oi])
+            # Unity DestinationPortalZProhibitsIncomingTeleport: refuse
+            # without blocked-teleport indicators.
             return 0
         locked = self.pairlock[self.porpair[pi]]
         si = self.snake_at(px, py)
@@ -2516,9 +2516,8 @@ class Game:
                 self.mark_failed_teleport(si, oi, dx, dy)
                 return 0
             if locked == 1:
-                # Pair still locked (usually exit occupied from a prior hop).
-                # Destination may look free to ignore_snake checks; still cue.
-                self.mark_failed_teleport(si, oi, dx, dy)
+                # Unity TeleportLock: refuse without new markers when the
+                # destination footprint is already clear.
                 return 0
             s = self.snake(si)
             s.translate(dx, dy)
@@ -2535,7 +2534,6 @@ class Game:
                 self.mark_failed_teleport(-1, oi, dx, dy)
                 return 0
             if locked == 1:
-                self.mark_failed_teleport(-1, oi, dx, dy)
                 return 0
             self.boxx[bx] = px + dx
             self.boxy[bx] = py + dy
@@ -2553,7 +2551,6 @@ class Game:
                 self.mark_failed_teleport(-1, oi, dx, dy)
                 return 0
             if locked == 1:
-                self.mark_failed_teleport(-1, oi, dx, dy)
                 return 0
             self.bombx[bb] = px + dx
             self.bomby[bb] = py + dy
