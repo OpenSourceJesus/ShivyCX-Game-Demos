@@ -5,7 +5,7 @@ Do not edit by hand; regenerate with `make levels`."""
 
 
 def level_count() -> int:
-    return 41
+    return 42
 
 
 def level_data(idx: int) -> "char*":
@@ -90,5 +90,7 @@ def level_data(idx: int) -> "char*":
     elif idx == 39:
         return 'V 12 10 500 -300\nA 1 0\nO 3 -3 0\nO 3 -5 0\nO 4 -4 0\nP 6 -3 0\nP 6 -4 0\nP 6 -5 0\nP 7 -3 0\nP 7 -4 0\nP 7 -5 0\nP 8 -3 0\nP 8 -4 0\nP 8 -5 0\nW 0 -1 0\nW 0 -2 0\nW 0 -3 1\nW 0 -4 0\nW 0 -5 0\nW 0 -6 2\nW 0 -7 0\nW 0 0 0\nW 0 1 0\nW 1 -7 0\nW 1 1 3\nW 10 -1 0\nW 10 -2 0\nW 10 -3 0\nW 10 -4 3\nW 10 -5 0\nW 10 -6 0\nW 10 -7 2\nW 2 -1 0\nW 2 -7 0\nW 2 0 0\nW 2 1 0\nW 3 -1 0\nW 3 -7 3\nW 4 -1 2\nW 4 -7 0\nW 5 -1 0\nW 5 -7 0\nW 6 -1 0\nW 6 -7 0\nW 7 -1 0\nW 7 -7 1\nW 8 -1 1\nW 8 -7 0\nW 9 -1 0\nW 9 -7 0\nI 2 -5 1\nD 9 -4 0 255 210 1 1 -1 0\nS 0 255 0 2 3 -4 2 -4'
     elif idx == 40:
-        return 'V 12 9 600 -350\nA 10 -6\nM 4 -3 0\nO 4 -2 0\nO 4 -4 1\nO 9 -2 0\nP 10 -2 1\nP 10 -3 1\nP 10 -4 1\nP 10 -5 1\nW 1 -1 0\nW 1 -2 0\nW 1 -3 3\nW 1 -4 0\nW 1 -5 0\nW 1 -6 0\nW 1 0 0\nW 10 -7 0\nW 10 0 0\nW 11 -1 0\nW 11 -2 3\nW 11 -3 0\nW 11 -4 0\nW 11 -5 0\nW 11 -6 0\nW 11 -7 1\nW 11 0 0\nW 2 -6 2\nW 2 0 0\nW 3 -6 0\nW 3 0 2\nW 4 -6 0\nW 4 0 0\nW 5 -6 0\nW 5 0 0\nW 6 -6 0\nW 6 0 0\nW 7 -1 0\nW 7 -2 4\nW 7 -3 0\nW 7 -4 0\nW 7 -5 0\nW 7 -6 3\nW 7 0 0\nW 8 -3 0\nW 8 0 1\nW 9 -3 0\nW 9 -4 2\nW 9 -5 0\nW 9 -6 0\nW 9 -7 0\nW 9 0 0\nL 2 -1 -1\nY 2 -5 -1\nS 0 255 0 2 3 -3 2 -3'
+        return 'V 13 9 650 -350\nA 11 -6\nM 4 -3 0\nO 4 -2 1\nO 4 -4 0\nP 10 -3 1\nP 10 -4 1\nP 10 -5 1\nW 1 -1 0\nW 1 -2 0\nW 1 -3 3\nW 1 -4 0\nW 1 -5 0\nW 1 -6 0\nW 1 0 0\nW 10 -6 0\nW 10 -7 0\nW 10 0 0\nW 11 -1 0\nW 11 -2 3\nW 11 -3 0\nW 11 -4 0\nW 11 -7 0\nW 11 0 0\nW 12 -4 0\nW 12 -5 0\nW 12 -6 0\nW 12 -7 1\nW 2 -6 0\nW 2 0 0\nW 3 -6 2\nW 3 0 0\nW 4 -6 0\nW 4 0 2\nW 5 -6 0\nW 5 0 0\nW 6 -6 0\nW 6 0 0\nW 7 -1 0\nW 7 -2 4\nW 7 -3 0\nW 7 -4 0\nW 7 -5 0\nW 7 -6 3\nW 7 0 0\nW 8 -3 0\nW 8 0 1\nW 9 -3 0\nW 9 -4 2\nW 9 -5 0\nW 9 -6 0\nW 9 0 0\nL 2 -2 -1\nY 2 -4 -1\nS 0 255 0 2 3 -3 2 -3'
+    elif idx == 41:
+        return 'V 13 9 650 -350\nA 11 -6\nM 3 -2 0\nM 4 -3 0\nO 4 -2 1\nO 4 -4 0\nO 5 -4 0\nP 10 -2 1\nP 10 -3 1\nP 10 -4 1\nP 10 -5 1\nP 11 -5 1\nP 9 -2 1\nW 1 -1 0\nW 1 -2 0\nW 1 -3 3\nW 1 -4 0\nW 1 -5 0\nW 1 -6 0\nW 1 0 0\nW 10 -6 0\nW 10 -7 0\nW 10 0 0\nW 11 -1 0\nW 11 -2 3\nW 11 -3 0\nW 11 -4 0\nW 11 -7 0\nW 11 0 0\nW 12 -4 0\nW 12 -5 0\nW 12 -6 0\nW 12 -7 1\nW 2 -6 0\nW 2 0 0\nW 3 -6 2\nW 3 0 0\nW 4 -6 0\nW 4 0 2\nW 5 -6 0\nW 5 0 0\nW 6 -6 0\nW 6 0 0\nW 7 -1 0\nW 7 -2 4\nW 7 -3 0\nW 7 -4 0\nW 7 -5 0\nW 7 -6 3\nW 7 0 0\nW 8 -2 4\nW 8 -3 0\nW 8 0 1\nW 9 -3 0\nW 9 -4 2\nW 9 -5 0\nW 9 -6 0\nW 9 0 0\nL 2 -2 -1\nY 2 -4 -1\nS 0 255 0 2 3 -3 2 -3\nS 255 128 0 2 3 -5 2 -5'
     return ""

@@ -656,7 +656,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--game", default=os.path.expanduser("~/snake-game"))
     ap.add_argument("--out", default=os.path.join(HERE, ".."))
-    ap.add_argument("--levels", type=int, default=44,
+    ap.add_argument("--levels", type=int, default=45,
                     help="highest Unity scene number to consider (inclusive)")
     ap.add_argument("--exclude", type=int, nargs="*", default=None,
                     help="Unity scene numbers to skip (default: %s)"

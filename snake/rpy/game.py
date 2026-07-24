@@ -1057,8 +1057,9 @@ class Game:
 
         Mirrors GameManager.LoadCheckpoint(skipUnloadable): Unloadable
         boxes/bombs keep their live pose; other objects whose checkpoint
-        pose would overlap a live Unloadable (whatIsSolid|whatCanTeleport)
-        also stay live; pits filled by an unrestored filler stay filled.
+        pose would overlap a live Unloadable (or another object already
+        blocked from restore — cascade) also stay live; pits filled by an
+        unrestored filler stay filled.
         """
         self._apply_buf(1)
 
@@ -1091,6 +1092,47 @@ class Game:
                         if self.bomby[i] == y:
                             return 1
             i = i + 1
+        return 0
+
+    def _checkpoint_restore_blocked_at(
+            self, x: int, y: int, skipb: "list[int]", skipm: "list[int]",
+            skips: "list[int]") -> int:
+        """1 if a checkpoint pose at (x,y) must stay live.
+
+        Mirrors GameManager.CheckpointRestorePoseBlockedByLiveOccupant:
+        Unloadables (incl. inactive/sunk) and live poses of objects already
+        blocked from restore both occupy the cell.
+        """
+        if self._unloadable_at(x, y) == 1:
+            return 1
+        i = 0
+        while i < len(self.boxx):
+            if i < len(skipb):
+                if skipb[i] == 1:
+                    if self.boxx[i] == x:
+                        if self.boxy[i] == y:
+                            return 1
+            i = i + 1
+        i = 0
+        while i < len(self.bombx):
+            if i < len(skipm):
+                if skipm[i] == 1:
+                    if self.bombx[i] == x:
+                        if self.bomby[i] == y:
+                            return 1
+            i = i + 1
+        si = 0
+        while si < self.nsnakes:
+            if si < len(skips):
+                if skips[si] == 1:
+                    s = self.snake(si)
+                    j = 0
+                    while j < len(s.xs):
+                        if s.xs[j] == x:
+                            if s.ys[j] == y:
+                                return 1
+                        j = j + 1
+            si = si + 1
         return 0
 
     def _unloadable_sunk_at(self, x: int, y: int) -> int:
@@ -1176,48 +1218,61 @@ class Game:
                     if self.bomb_unload[i] == 1:
                         skipm[i] = 1
                 i = i + 1
+            # CollectCheckpointRestoreOverlapBlocks: grow until a pass adds
+            # nothing. Blocked live poses then block further restores.
             k0 = self._applybuf_box_off()
-            i = 0
-            while i < nbox:
-                if skipb[i] == 0:
-                    cpx = d[k0 + i * 4]
-                    cpy = d[k0 + i * 4 + 1]
-                    cpl = d[k0 + i * 4 + 3]
-                    if cpl == 1:
-                        if self._unloadable_at(cpx, cpy) == 1:
-                            skipb[i] = 1
-                i = i + 1
             kb = k0 + nbox * 4
-            i = 0
-            while i < nbomb:
-                if skipm[i] == 0:
-                    cpx = d[kb + i * 3]
-                    cpy = d[kb + i * 3 + 1]
-                    cpl = d[kb + i * 3 + 2]
-                    if cpl == 1:
-                        if self._unloadable_at(cpx, cpy) == 1:
-                            skipm[i] = 1
-                i = i + 1
-            ks = kb + nbomb * 3 + len(self.swarmx) * 2
-            ns_peek = d[ks]
-            ks = ks + 1
-            si = 0
-            while si < ns_peek:
-                while si >= len(skips):
-                    skips.append(0)
-                np = d[ks + 9]
-                hit = 0
-                j = 0
-                while j < np:
-                    cpx = d[ks + 10 + j * 3]
-                    cpy = d[ks + 10 + j * 3 + 1]
-                    if self._unloadable_at(cpx, cpy) == 1:
-                        hit = 1
-                    j = j + 1
-                if hit == 1:
-                    skips[si] = 1
-                ks = ks + 10 + np * 3
-                si = si + 1
+            ks_snakes = kb + nbomb * 3 + len(self.swarmx) * 2
+            grew = 1
+            while grew == 1:
+                grew = 0
+                i = 0
+                while i < nbox:
+                    if skipb[i] == 0:
+                        cpx = d[k0 + i * 4]
+                        cpy = d[k0 + i * 4 + 1]
+                        cpl = d[k0 + i * 4 + 3]
+                        if cpl == 1:
+                            if self._checkpoint_restore_blocked_at(
+                                    cpx, cpy, skipb, skipm, skips) == 1:
+                                skipb[i] = 1
+                                grew = 1
+                    i = i + 1
+                i = 0
+                while i < nbomb:
+                    if skipm[i] == 0:
+                        cpx = d[kb + i * 3]
+                        cpy = d[kb + i * 3 + 1]
+                        cpl = d[kb + i * 3 + 2]
+                        if cpl == 1:
+                            if self._checkpoint_restore_blocked_at(
+                                    cpx, cpy, skipb, skipm, skips) == 1:
+                                skipm[i] = 1
+                                grew = 1
+                    i = i + 1
+                ks = ks_snakes
+                ns_peek = d[ks]
+                ks = ks + 1
+                si = 0
+                while si < ns_peek:
+                    while si >= len(skips):
+                        skips.append(0)
+                    np = d[ks + 9]
+                    if skips[si] == 0:
+                        hit = 0
+                        j = 0
+                        while j < np:
+                            cpx = d[ks + 10 + j * 3]
+                            cpy = d[ks + 10 + j * 3 + 1]
+                            if self._checkpoint_restore_blocked_at(
+                                    cpx, cpy, skipb, skipm, skips) == 1:
+                                hit = 1
+                            j = j + 1
+                        if hit == 1:
+                            skips[si] = 1
+                            grew = 1
+                    ks = ks + 10 + np * 3
+                    si = si + 1
 
         k = 0
         self.turn = d[k]
@@ -1406,22 +1461,23 @@ class Game:
                         if keep == 1:
                             self.filled[i] = 1
                             self.fillsbox[i] = live_fillsbox[i]
-                # Exploded weak walls stay gone if an unrestored box/bomb
-                # still occupies the cell (Unloadable or overlap-blocked).
+                # Exploded weak walls stay gone if an unrestored box/bomb/
+                # snake still occupies the cell (Unloadable or overlap-
+                # blocked, including cascade).
                 if live_wall[i] == 0:
                     if self.wall[i] == 5:
                         cx = self.minx + (i % self.gw)
                         cy = self.miny + (i // self.gw)
-                        if self._unrestored_obj_at(cx, cy, skipb,
-                                                   skipm) == 1:
+                        if self._unrestored_obj_at(cx, cy, skipb, skipm,
+                                                   skips) == 1:
                             self.wall[i] = 0
                 i = i + 1
             self.dirty = 1
 
     def _unrestored_obj_at(self, x: int, y: int, skipb: "list[int]",
-                           skipm: "list[int]") -> int:
-        """1 if a skipped (Unloadable / overlap-blocked) box or bomb is on
-        the surface at (x, y) after a checkpoint load."""
+                           skipm: "list[int]", skips: "list[int]") -> int:
+        """1 if a skipped (Unloadable / overlap-blocked) box, bomb, or snake
+        is on the surface at (x, y) after a checkpoint load."""
         i = 0
         while i < len(self.boxx):
             if i < len(skipb):
@@ -1441,6 +1497,24 @@ class Game:
                             if self.bomby[i] == y:
                                 return 1
             i = i + 1
+        si = 0
+        while si < self.nsnakes:
+            if si < len(skips):
+                if skips[si] == 1:
+                    s = self.snake(si)
+                    if s.alive == 1:
+                        if s.gone == 0:
+                            j = 0
+                            while j < len(s.xs):
+                                if s.xs[j] == x:
+                                    if s.ys[j] == y:
+                                        if j < len(s.zs):
+                                            if s.zs[j] == 0:
+                                                return 1
+                                        else:
+                                            return 1
+                                j = j + 1
+            si = si + 1
         return 0
 
     # undo/redo entries are [corelen, core..., chklen, chk...] appended to a
@@ -1689,6 +1763,13 @@ class Game:
 
     # ------------------------------------------------------------- movement
 
+    def _snake_in_push(self, si: int) -> int:
+        """1 if snake si is already being rigidly pushed in this chain."""
+        bit = 1 << si
+        if (self.pushmask & bit) != 0:
+            return 1
+        return 0
+
     def try_push_at(self, x: int, y: int, dx: int, dy: int,
                     depth: int, do_push: int) -> int:
         """Push whatever occupies (x,y) one cell. 1 = cell was vacated.
@@ -1721,8 +1802,12 @@ class Game:
             blocked = 1
         if self.bomb_at(nx, ny) >= 0:
             blocked = 1
-        if self.snake_at(nx, ny) >= 0:
-            blocked = 1
+        oi = self.snake_at(nx, ny)
+        if oi >= 0:
+            # A snake already moving in this push chain vacates its cell
+            # (Unity sequential part Push). Do not treat it as a blocker.
+            if self._snake_in_push(oi) == 0:
+                blocked = 1
         if blocked == 1:
             if self.try_push_at(nx, ny, dx, dy, depth + 1, do_push) == 0:
                 if bb >= 0:
@@ -1756,49 +1841,66 @@ class Game:
                 self.object_landed(-1, bb)
         return 1
 
+    def _try_push_snake_part(self, si: int, j: int, dx: int, dy: int,
+                             do_push: int) -> int:
+        """Resolve obstacles in front of one snake part (Unity TryPush on part).
+
+        Any surface part can push boxes/bombs/snakes — not only the head.
+        1 = that part can advance.
+        """
+        s = self.snake(si)
+        if j >= s.npart():
+            return 0
+        if j < len(s.zs):
+            if s.zs[j] != 0:
+                return 1
+        tx = s.xs[j] + dx
+        ty = s.ys[j] + dy
+        # Boxes/bombs first — any part can shove them (including into a cell
+        # another of our parts is vacating this same rigid slide).
+        if self.box_at(tx, ty) >= 0:
+            return self.try_push_at(tx, ty, dx, dy, 0, do_push)
+        if self.bomb_at(tx, ty) >= 0:
+            return self.try_push_at(tx, ty, dx, dy, 0, do_push)
+        # Own surface body ahead vacates simultaneously — clear.
+        if s.occupies(tx, ty) == 1:
+            return 1
+        if self.wall_at(tx, ty) == 1:
+            return 0
+        if self.apple_at(tx, ty) == 1:
+            return 0
+        oi = self.snake_at(tx, ty)
+        if oi >= 0:
+            if oi == si:
+                return 1
+            if self._snake_in_push(oi) == 1:
+                return 1
+            return self.try_push_snake(oi, dx, dy, do_push)
+        return 1
+
     def try_push_snake(self, si: int, dx: int, dy: int,
                        do_push: int) -> int:
         """Translate the whole snake rigidly by one cell.
 
-        Like the original TryPushSnake: each part's destination may itself
-        need a box/bomb/snake push, so those are resolved (probe then
-        commit) before the snake slides. pushmask blocks A↔B push cycles.
+        Like the original TryPushSnake: each active part runs TryPush so a
+        tail/body can shove boxes and bombs, then the part advances.
+        pushmask marks snakes in the current chain; re-entry is success
+        (already moving), matching Unity's pushedSnakes set.
         """
         s = self.snake(si)
         if s.gone == 1:
             return 0
         bit = 1 << si
         if (self.pushmask & bit) != 0:
-            return 0                        # already being pushed in this chain
+            return 1                        # already moving in this chain
         self.pushmask = self.pushmask | bit
         ok = 1
         # --- feasibility pass (no mutations) ---
         j = 0
         while j < s.npart():
-            tx = s.xs[j] + dx
-            ty = s.ys[j] + dy
-            if s.on_cell_any(tx, ty) == 0:
-                if self.wall_at(tx, ty) == 1:
-                    ok = 0
-                    break
-                if self.apple_at(tx, ty) == 1:
-                    ok = 0
-                    break
-                if self.box_at(tx, ty) >= 0:
-                    if self.try_push_at(tx, ty, dx, dy, 0, 0) == 0:
-                        ok = 0
-                        break
-                elif self.bomb_at(tx, ty) >= 0:
-                    if self.try_push_at(tx, ty, dx, dy, 0, 0) == 0:
-                        ok = 0
-                        break
-                else:
-                    oi = self.snake_at(tx, ty)
-                    if oi >= 0:
-                        if oi != si:
-                            if self.try_push_snake(oi, dx, dy, 0) == 0:
-                                ok = 0
-                                break
+            if self._try_push_snake_part(si, j, dx, dy, 0) == 0:
+                ok = 0
+                break
             j = j + 1
         if ok == 0:
             self.pushmask = self.pushmask ^ bit
@@ -1806,21 +1908,12 @@ class Game:
         if do_push == 0:
             self.pushmask = self.pushmask ^ bit
             return 1
-        # --- commit: shove whatever sits on each destination, then slide ---
+        # --- commit: shove obstacles for every part, then slide together ---
         j = 0
         while j < s.npart():
-            tx = s.xs[j] + dx
-            ty = s.ys[j] + dy
-            if s.on_cell_any(tx, ty) == 0:
-                if self.box_at(tx, ty) >= 0:
-                    self.try_push_at(tx, ty, dx, dy, 0, 1)
-                elif self.bomb_at(tx, ty) >= 0:
-                    self.try_push_at(tx, ty, dx, dy, 0, 1)
-                else:
-                    oi = self.snake_at(tx, ty)
-                    if oi >= 0:
-                        if oi != si:
-                            self.try_push_snake(oi, dx, dy, 1)
+            if self._try_push_snake_part(si, j, dx, dy, 1) == 0:
+                self.pushmask = self.pushmask ^ bit
+                return 0
             j = j + 1
         s.translate(dx, dy)
         self.pushmask = self.pushmask ^ bit
@@ -2078,13 +2171,16 @@ class Game:
             pi = pi + 1
 
     def portal_eligible(self, pi: int) -> int:
-        """Portal may fire: linked, freshly entered (cell was clear at the
-        last resolution), and its pair is not locked."""
+        """Portal may fire: linked and freshly entered (cell was clear at
+        the last resolution).
+
+        Pair-lock is checked in try_teleport after destination blocking so
+        an occupied exit still gets blocked-teleport indicators (Unity marks
+        OtherPortal occupancy before teleport-lock refusal).
+        """
         if self.portal_other(pi) < 0:
             return 0
         if self.porocc[pi] == 1:
-            return 0
-        if self.pairlock[self.porpair[pi]] == 1:
             return 0
         return 1
 
@@ -2113,25 +2209,81 @@ class Game:
             pi = pi + 1
         return 0
 
+    def teleport_occupancy_at(self, x: int, y: int,
+                              ignore_snake: int) -> int:
+        """1 if a box, bomb, or foreign snake occupies (x, y).
+
+        Used for Unity OtherPortalForeignOccupancyBlocksTeleport: the exit
+        portal gets an indicator when an entity blocks that cell (walls and
+        apples are handled only via destination-footprint markers).
+        """
+        if self.bomb_at(x, y) >= 0:
+            return 1
+        if self.box_at(x, y) >= 0:
+            return 1
+        i = 0
+        while i < len(self.boxx):
+            if self.boxlive[i] == 1:
+                if self.boxx[i] == x:
+                    if self.boxy[i] == y:
+                        if self.boxz[i] > 0:
+                            if self._box_vis_arrived(i) == 0:
+                                return 1
+            i = i + 1
+        osnk = self.snake_at(x, y)
+        if osnk >= 0:
+            if osnk != ignore_snake:
+                return 1
+        si = 0
+        while si < self.nsnakes:
+            if si != ignore_snake:
+                s = self.snake(si)
+                if s.gone == 1:
+                    if self._snake_vis_arrived(si) == 0:
+                        j = 0
+                        while j < s.npart():
+                            if s.xs[j] == x:
+                                if s.ys[j] == y:
+                                    return 1
+                            j = j + 1
+            si = si + 1
+        return 0
+
+    def teleport_dest_blocked_at(self, x: int, y: int,
+                                 ignore_snake: int) -> int:
+        """1 if a teleport cannot land a part on (x, y).
+
+        Matches Unity DestinationHasBlockingSolidOverlap during pit fills:
+        logical fill sets boxz/gone immediately, but Unity keeps the filler
+        collider active until the fall finishes — so a portal over a pit
+        that is still being filled must block and show indicators.
+        """
+        if self.wall_at(x, y) == 1:
+            return 1
+        if self.apple_at(x, y) == 1:
+            return 1
+        return self.teleport_occupancy_at(x, y, ignore_snake)
+
+    def portal_dest_depth_blocks(self, oi: int) -> int:
+        """1 when the exit portal cannot receive teleports.
+
+        Unity DestinationPortalZProhibitsIncomingTeleport: a portal whose
+        carrier has finished sinking into a filled pit sits above floor
+        depth 0 and rejects incoming teleports.
+        """
+        bi = self.porbox[oi]
+        if bi < 0:
+            return 0
+        return self.conn_carrier_hidden(bi)
+
     def snake_fits(self, si: int, dx: int, dy: int) -> int:
         """1 if snake si translated by (dx,dy) lands on free cells."""
         s = self.snake(si)
         j = 0
         while j < s.npart():
-            tx = s.xs[j] + dx
-            ty = s.ys[j] + dy
-            if self.wall_at(tx, ty) == 1:
+            if self.teleport_dest_blocked_at(s.xs[j] + dx, s.ys[j] + dy,
+                                            si) == 1:
                 return 0
-            if self.apple_at(tx, ty) == 1:
-                return 0
-            if self.box_at(tx, ty) >= 0:
-                return 0
-            if self.bomb_at(tx, ty) >= 0:
-                return 0
-            osnk = self.snake_at(tx, ty)
-            if osnk >= 0:
-                if osnk != si:
-                    return 0
             j = j + 1
         return 1
 
@@ -2218,8 +2370,12 @@ class Game:
             oa = self.portal_other(ea)
             dxa = self.porx[oa] - self.porx[ea]
             dya = self.pory[oa] - self.pory[ea]
-            if self.snake_fits(si, dxa, dya) == 0:
+            if self.portal_dest_depth_blocks(oa) == 1:
                 feasible = 0
+                self.mark_blocked(self.porx[oa], self.pory[oa])
+            elif self.snake_fits(si, dxa, dya) == 0:
+                feasible = 0
+                self.mark_failed_teleport(si, oa, dxa, dya)
             b = a + 1
             while b < len(self.entbuf):
                 eb = self.entbuf[b]
@@ -2236,6 +2392,19 @@ class Game:
             if conj == 1:
                 return 2
             return 0
+        # Refuse locked pairs (after marking path above for blocked exits).
+        a = 0
+        while a < len(self.entbuf):
+            ea = self.entbuf[a]
+            if self.pairlock[self.porpair[ea]] == 1:
+                oa = self.portal_other(ea)
+                self.mark_failed_teleport(si, oa,
+                                          self.porx[oa] - self.porx[ea],
+                                          self.pory[oa] - self.pory[ea])
+                if conj == 1:
+                    return 2
+                return 0
+            a = a + 1
         # commit: clones copy the pre-teleport shape, so make them before
         # translating the original through the first entry
         k = 1
@@ -2260,55 +2429,6 @@ class Game:
         _log("[game] teleported")
         return 1
 
-    def try_teleport(self, pi: int, oi: int, px: int, py: int,
-                     blockmask: int) -> int:
-        dx = self.porx[oi] - px
-        dy = self.pory[oi] - py
-        si = self.snake_at(px, py)
-        if si >= 0:
-            if ((blockmask >> si) & 1) == 1:
-                return 0
-            if self.snake_fits(si, dx, dy) == 1:
-                s = self.snake(si)
-                s.translate(dx, dy)
-                # Crawl into the entry portal first; snap to exit after.
-                s.warp = 1
-                s.wdx = dx
-                s.wdy = dy
-                self.pairlock[self.porpair[pi]] = 1
-                _log("[game] teleported")
-                return 1
-            self.mark_blocked(self.porx[oi], self.pory[oi])
-            return 0
-        bx = self.box_at(px, py)
-        if bx >= 0:
-            if self.cell_free(px + dx, py + dy, -1) == 1:
-                self.boxx[bx] = px + dx
-                self.boxy[bx] = py + dy
-                self.move_box_connectables(bx, dx, dy)
-                self.box_warp[bx] = 1
-                self.box_wdx[bx] = dx
-                self.box_wdy[bx] = dy
-                self.pairlock[self.porpair[pi]] = 1
-                self.object_landed(bx, -1)
-                _log("[game] box teleported")
-                return 1
-            self.mark_blocked(self.porx[oi], self.pory[oi])
-            return 0
-        bb = self.bomb_at(px, py)
-        if bb >= 0:
-            if self.cell_free(px + dx, py + dy, -1) == 1:
-                self.bombx[bb] = px + dx
-                self.bomby[bb] = py + dy
-                self.bomb_warp[bb] = 1
-                self.bomb_wdx[bb] = dx
-                self.bomb_wdy[bb] = dy
-                self.pairlock[self.porpair[pi]] = 1
-                self.object_landed(-1, bb)
-                return 1
-            self.mark_blocked(self.porx[oi], self.pory[oi])
-        return 0
-
     def mark_blocked(self, x: int, y: int) -> None:
         # chained passes retry blocked portals; keep one marker per cell
         i = 0
@@ -2316,11 +2436,109 @@ class Game:
             if self.blockx[i] == x:
                 if self.blocky[i] == y:
                     self.blockms[i] = engine.ms()
+                    self.dirty = 1
                     return
             i = i + 1
         self.blockx.append(x)
         self.blocky.append(y)
         self.blockms.append(engine.ms())
+        self.dirty = 1
+
+    def mark_failed_teleport(self, si: int, oi: int,
+                             dx: int, dy: int) -> None:
+        """Spawn blocked-teleport indicators for a failed wormhole attempt.
+
+        Unity pairs two cues:
+        - OtherPortalForeignOccupancy → indicator on the exit portal when an
+          entity (box/bomb/snake) blocks that cell
+        - DestinationHasBlockingSolidOverlap → indicator on every destination
+          footprint cell that actually collides (walls, entities, …)
+
+        So the exit portal is marked when occupied; other colliding cells are
+        marked additionally, or alone when the exit itself is free.
+        """
+        ex = self.porx[oi]
+        ey = self.pory[oi]
+        if self.teleport_occupancy_at(ex, ey, si) == 1:
+            self.mark_blocked(ex, ey)
+        if si >= 0:
+            s = self.snake(si)
+            j = 0
+            while j < s.npart():
+                tx = s.xs[j] + dx
+                ty = s.ys[j] + dy
+                if self.teleport_dest_blocked_at(tx, ty, si) == 1:
+                    self.mark_blocked(tx, ty)
+                j = j + 1
+        else:
+            # Box/bomb destination is the exit cell.
+            self.mark_blocked(ex, ey)
+
+    def try_teleport(self, pi: int, oi: int, px: int, py: int,
+                     blockmask: int) -> int:
+        dx = self.porx[oi] - px
+        dy = self.pory[oi] - py
+        if self.portal_dest_depth_blocks(oi) == 1:
+            # Sunk exit portal (filled-pit carrier): block and mark the exit.
+            self.mark_blocked(self.porx[oi], self.pory[oi])
+            return 0
+        locked = self.pairlock[self.porpair[pi]]
+        si = self.snake_at(px, py)
+        if si >= 0:
+            if ((blockmask >> si) & 1) == 1:
+                return 0
+            if self.snake_fits(si, dx, dy) == 0:
+                self.mark_failed_teleport(si, oi, dx, dy)
+                return 0
+            if locked == 1:
+                # Pair still locked (usually exit occupied from a prior hop).
+                # Destination may look free to ignore_snake checks; still cue.
+                self.mark_failed_teleport(si, oi, dx, dy)
+                return 0
+            s = self.snake(si)
+            s.translate(dx, dy)
+            # Crawl into the entry portal first; snap to exit after.
+            s.warp = 1
+            s.wdx = dx
+            s.wdy = dy
+            self.pairlock[self.porpair[pi]] = 1
+            _log("[game] teleported")
+            return 1
+        bx = self.box_at(px, py)
+        if bx >= 0:
+            if self.teleport_dest_blocked_at(px + dx, py + dy, -1) == 1:
+                self.mark_failed_teleport(-1, oi, dx, dy)
+                return 0
+            if locked == 1:
+                self.mark_failed_teleport(-1, oi, dx, dy)
+                return 0
+            self.boxx[bx] = px + dx
+            self.boxy[bx] = py + dy
+            self.move_box_connectables(bx, dx, dy)
+            self.box_warp[bx] = 1
+            self.box_wdx[bx] = dx
+            self.box_wdy[bx] = dy
+            self.pairlock[self.porpair[pi]] = 1
+            self.object_landed(bx, -1)
+            _log("[game] box teleported")
+            return 1
+        bb = self.bomb_at(px, py)
+        if bb >= 0:
+            if self.teleport_dest_blocked_at(px + dx, py + dy, -1) == 1:
+                self.mark_failed_teleport(-1, oi, dx, dy)
+                return 0
+            if locked == 1:
+                self.mark_failed_teleport(-1, oi, dx, dy)
+                return 0
+            self.bombx[bb] = px + dx
+            self.bomby[bb] = py + dy
+            self.bomb_warp[bb] = 1
+            self.bomb_wdx[bb] = dx
+            self.bomb_wdy[bb] = dy
+            self.pairlock[self.porpair[pi]] = 1
+            self.object_landed(-1, bb)
+            return 1
+        return 0
 
     # ------------------------------------------------------------ ice slides
 
@@ -3697,15 +3915,24 @@ class Game:
                              self.cell_py(self.stary[i]), 232, 253,
                              16777215, a, 0)
             i = i + 1
-        # blocked-teleport indicators (fade out over a second)
+        # blocked-teleport indicators. Unity prefab lifetime=2s; texture is
+        # white with SpriteRenderer.color red — use solid-tint mode so the
+        # alpha mask is forced pure red on walls and filled pits.
         i = 0
         while i < len(self.blockx):
             age = tms - self.blockms[i]
-            if age < 1000:
+            if age < 0:
+                age = 0
+            if age < 2000:
+                a = 256 - age * 256 // 2000
+                if a < 1:
+                    a = 1
+                if a > 256:
+                    a = 256
                 engine.sprite_ex(engine.SPR_BLOCKED,
                                  self.cell_px(self.blockx[i]),
                                  self.cell_py(self.blocky[i]), cell, cell,
-                                 16777215, 256 - age * 256 // 1000, 0)
+                                 16711680 + 16777216, a, 0)
             i = i + 1
         self.draw_hud()
 
@@ -4150,7 +4377,8 @@ class Game:
 
         A pushed box/bomb stays put until something crawling onto its
         visual cell reaches sprite-contact distance, then coasts with the
-        pusher. Returns 0 when nothing is on the cell yet (do not free-run).
+        pusher. Any snake part can be the pusher (tail/body included) —
+        not only the head. Returns 0 when nothing is on the cell yet.
         self_box/self_bomb skip this object so it cannot freeze itself.
         """
         cx = self._vis_cell(vx)
@@ -4166,14 +4394,29 @@ class Game:
         while si < self.nsnakes:
             s = self.snake(si)
             if s.gone == 0:
-                if s.npart() > 0:
-                    if s.xs[0] == cx:
-                        if s.ys[0] == cy:
-                            if len(s.vx) > 0:
-                                hit = obj_r + snake_r
-                                if self._manhattan256(s.vx[0], s.vy[0],
-                                                      vx, vy) <= hit:
-                                    return 1
+                j = 0
+                while j < s.npart():
+                    if j < len(s.zs):
+                        if s.zs[j] != 0:
+                            j = j + 1
+                            continue
+                    if j < len(s.vx):
+                        # Logical dest on this cell (part crawling onto it)
+                        # or visual still covering it.
+                        on_cell = 0
+                        if s.xs[j] == cx:
+                            if s.ys[j] == cy:
+                                on_cell = 1
+                        if on_cell == 0:
+                            if self._vis_cell(s.vx[j]) == cx:
+                                if self._vis_cell(s.vy[j]) == cy:
+                                    on_cell = 1
+                        if on_cell == 1:
+                            hit = obj_r + snake_r
+                            if self._manhattan256(s.vx[j], s.vy[j],
+                                                  vx, vy) <= hit:
+                                return 1
+                    j = j + 1
             si = si + 1
         i = 0
         while i < len(self.boxx):
