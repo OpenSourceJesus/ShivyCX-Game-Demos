@@ -468,6 +468,16 @@ SPRITES = [
     ("STAROFF",   "Level Button Star (Uncollected).png", None, 48),
     ("BLOCKED",   "Teleport Blocked Indicator.png", None, 96),
     ("BACKGROUND", "Level Background.png", None, 960),
+    # Unity Explosion prefab: 900ppu sprite × scale 3 → 3 cells; 9 frames.
+    ("EXPLO1",    "Explosion/Explosion_1.png", None, 288),
+    ("EXPLO2",    "Explosion/Explosion_2.png", None, 288),
+    ("EXPLO3",    "Explosion/Explosion_3.png", None, 288),
+    ("EXPLO4",    "Explosion/Explosion_4.png", None, 288),
+    ("EXPLO5",    "Explosion/Explosion_5.png", None, 288),
+    ("EXPLO6",    "Explosion/Explosion_6.png", None, 288),
+    ("EXPLO7",    "Explosion/Explosion_7.png", None, 288),
+    ("EXPLO8",    "Explosion/Explosion_8.png", None, 288),
+    ("EXPLO9",    "Explosion/Explosion_9.png", None, 288),
 ]
 
 

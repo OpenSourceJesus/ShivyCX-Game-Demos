@@ -21,6 +21,7 @@ MAX_SNAKES = 6                          # 3 level slots + room for clones
 MAX_SN_DRAW = 64                        # scratch capacity for Bezier snake draw
 CRAWL_MS = 200          # 0.2 s per cell, the original moveSpeed=5
 WIN_HOLD_MS = 2000      # congrats hold, the original endAnimDur=2
+EXPLODE_MS = 350        # Unity Explode.anim: 9 frames
 GROW_MS = 1000          # tail growth, the original growSpeed=1
 
 
@@ -307,6 +308,9 @@ class Game:
         self.blockx: "list[int]" = []
         self.blocky: "list[int]" = []
         self.blockms: "list[int]" = []
+        self.explox: "list[int]" = []      # bomb explosion FX (cell coords)
+        self.exploy: "list[int]" = []
+        self.exploms: "list[int]" = []
         self.winning = 0
         self.winms = 0
         self.grew = 0
@@ -681,6 +685,9 @@ class Game:
         self.blockx = []
         self.blocky = []
         self.blockms = []
+        self.explox = []
+        self.exploy = []
+        self.exploms = []
         self.winning = 0
         self.grew = 0
 
@@ -1628,6 +1635,24 @@ class Game:
         cx = self.bombx[bi]
         cy = self.bomby[bi]
         self.bomblive[bi] = 0
+        # Drop finished flashes so the FX lists stay short.
+        i = 0
+        now = engine.ms()
+        while i < len(self.exploms):
+            if now - self.exploms[i] >= EXPLODE_MS:
+                self.explox[i] = self.explox[len(self.explox) - 1]
+                self.exploy[i] = self.exploy[len(self.exploy) - 1]
+                self.exploms[i] = self.exploms[len(self.exploms) - 1]
+                self.explox.pop()
+                self.exploy.pop()
+                self.exploms.pop()
+            else:
+                i = i + 1
+        # Unity Instantiates Explosion.prefab at the bomb (9-frame flash).
+        self.explox.append(cx)
+        self.exploy.append(cy)
+        self.exploms.append(now)
+        self.dirty = 1
         _log("[game] bomb exploded")
         dy = -1
         while dy <= 1:
@@ -3933,6 +3958,22 @@ class Game:
                                  self.cell_px(self.blockx[i]),
                                  self.cell_py(self.blocky[i]), cell, cell,
                                  16711680 + 16777216, a, 0)
+            i = i + 1
+        # Bomb explosions: Unity Explosion.prefab (scale 3 → 3 cells, 9 frames).
+        i = 0
+        while i < len(self.explox):
+            age = tms - self.exploms[i]
+            if age < 0:
+                age = 0
+            if age < EXPLODE_MS:
+                fr = age * 9 // EXPLODE_MS
+                if fr > 8:
+                    fr = 8
+                sid = engine.SPR_EXPLO1 + fr
+                sz = cell * 3
+                px = self.cell_px(self.explox[i]) + (cell - sz) // 2
+                py = self.cell_py(self.exploy[i]) + (cell - sz) // 2
+                engine.sprite(sid, px, py, sz, sz)
             i = i + 1
         self.draw_hud()
 
