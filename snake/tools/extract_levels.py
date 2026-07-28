@@ -478,6 +478,9 @@ SPRITES = [
     ("EXPLO7",    "Explosion/Explosion_7.png", None, 288),
     ("EXPLO8",    "Explosion/Explosion_8.png", None, 288),
     ("EXPLO9",    "Explosion/Explosion_9.png", None, 288),
+    # Pit.prefab / Trapdoor pitGo children: Grass Top/Bottom/Left/Right
+    # (Grass.png, 300×28 @ 300 ppu → 1 × 0.09333 cells).
+    ("PITEDGE",   "Grass.png",           None, 96),
 ]
 
 
@@ -657,16 +660,16 @@ def solve(level_text, max_nodes=2000000):
 # --------------------------------------------------------------------- main
 
 # Unity scene numbers (1-based filenames like 33.unity) to skip. Remake
-# level indices stay consecutive: after excluding 33 and 35 from 1..44,
-# the pack has 42 levels (Unity 34 → remake #33, Unity 36 → remake #34, …).
-EXCLUDE_LEVELS = frozenset([33, 35, 42])
+# level indices stay consecutive: after excluding 32, 34, and 41 from 1..43,
+# the pack has 40 levels (Unity 33 → remake #32, Unity 35 → remake #33, …).
+EXCLUDE_LEVELS = frozenset([32, 34, 41])
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--game", default=os.path.expanduser("~/snake-game"))
     ap.add_argument("--out", default=os.path.join(HERE, ".."))
-    ap.add_argument("--levels", type=int, default=45,
+    ap.add_argument("--levels", type=int, default=43,
                     help="highest Unity scene number to consider (inclusive)")
     ap.add_argument("--exclude", type=int, nargs="*", default=None,
                     help="Unity scene numbers to skip (default: %s)"

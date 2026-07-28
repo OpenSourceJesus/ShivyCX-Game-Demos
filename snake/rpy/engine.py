@@ -106,6 +106,7 @@ SPR_EXPLO6 = 37
 SPR_EXPLO7 = 38
 SPR_EXPLO8 = 39
 SPR_EXPLO9 = 40
+SPR_PITEDGE = 41
 
 NO_TINT = 16777215          # 0xFFFFFF
 # Top byte 0x01: solid RGB from low 24 bits; sprite supplies alpha only.

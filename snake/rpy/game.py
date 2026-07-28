@@ -2019,12 +2019,15 @@ class Game:
 
         Like Unity PropelZoneAt same-z matching: a zone on a fallen box
         (boxz>0) only rides entities at that depth. Dead carriers yield -1
-        (zone is not rideable).
+        (zone is not rideable). A sunk carrier's propel stays rideable only
+        when the zone itself sits on a pit cell.
         """
         bi = self.connbox[ci]
         if bi < 0:
             return 0
         if self.boxlive[bi] == 0:
+            return -1
+        if self.conn_zone_hidden(bi, self.connx[ci], self.conny[ci], 1) == 1:
             return -1
         return self.boxz[bi]
 
@@ -3563,8 +3566,9 @@ class Game:
         """1 if a connectable anchored to box bi should stay hidden.
 
         Carriers lost to the void, or finished sinking into a deep pit, take
-        their portals / save / load / propel zones with them. During the
-        crawl into the pit the zone still rides the sprite.
+        their portals / save / load zones with them. During the crawl into
+        the pit the zone still rides the sprite. Propel zones may stay
+        visible when they are also on a pit — see conn_zone_hidden.
         """
         if bi < 0:
             return 0
@@ -3576,14 +3580,42 @@ class Game:
             return self._box_vis_arrived(bi)
         return 0
 
+    def conn_zone_hidden(self, bi: int, zx: int, zy: int,
+                         is_propel: int) -> int:
+        """1 if this connectable should not draw or act.
+
+        Unity Pit.Fill: a connectable whose FallDepth at its own cell is
+        below the carrier's fall depth is deactivated; one that is also on
+        a pit (FallDepth >= carrier z) stays active. Propel zones follow
+        that rule. Portals / save / load still hide whenever the carrier
+        has finished sinking.
+        """
+        if self.conn_carrier_hidden(bi) == 0:
+            return 0
+        if is_propel == 0:
+            return 1
+        if bi < 0:
+            return 0
+        if bi >= len(self.boxx):
+            return 1
+        if self.boxlive[bi] == 0:
+            return 1
+        # Sunk carrier: keep propel visible only if the zone is on a pit.
+        ci = self.idx(zx, zy)
+        if ci < 0:
+            return 1
+        if self.pit[ci] > 0:
+            return 0
+        return 1
+
     def draw_connectable_line(self, zx: int, zy: int, bi: int,
-                              rgb: int) -> None:
+                              rgb: int, is_propel: int) -> None:
         """Zone/portal → box/bomb line; alpha matches line.startColor.a."""
         if bi < 0:
             return
         if bi >= len(self.boxx):
             return
-        if self.conn_carrier_hidden(bi) == 1:
+        if self.conn_zone_hidden(bi, zx, zy, is_propel) == 1:
             return
         cell = self.cell
         x0 = self.conn_draw_px(zx, zy, bi) + cell // 2
@@ -3669,6 +3701,59 @@ class Game:
             i = i + 1
         return 0
 
+    def _edge_blocked_at(self, x: int, y: int) -> int:
+        """1 if a pit-edge facing (x,y) should stay inactive.
+
+        Matches Tools/RemovePitEdges: hide the child Grass edge when its
+        position sits inside a Pit, Wall, Door, or Trapdoor sprite bound.
+        """
+        i = self.idx(x, y)
+        if i < 0:
+            return 0
+        if self.pit[i] > 0:
+            return 1
+        if self.wall[i] > 0:
+            return 1
+        if self.doorat[i] >= 0:
+            return 1
+        if self.trapst[i] >= 0:
+            return 1
+        return 0
+
+    def draw_pit_edges(self, x: int, y: int, px: int, py: int) -> None:
+        """Draw activated Grass Top/Bottom/Left/Right around a pit cell.
+
+        Prefab offsets are ±0.5466667 cells from center; sprite is 1×0.09333
+        cells, rotated 0/90/180/270 like the Unity children.
+        """
+        cell = self.cell
+        eh = cell * 28 // 300
+        if eh < 1:
+            eh = 1
+        off = cell * 164 // 300
+        cx = px + cell // 2
+        cy = py + cell // 2
+        # Top (+y / north): rot 0
+        if self._edge_blocked_at(x, y + 1) == 0:
+            engine.sprite_ex(engine.SPR_PITEDGE,
+                             cx - cell // 2, cy - off - eh // 2,
+                             cell, eh, 16777215, 256, 0)
+        # Bottom (−y / south): rot 180
+        if self._edge_blocked_at(x, y - 1) == 0:
+            engine.sprite_ex(engine.SPR_PITEDGE,
+                             cx - cell // 2, cy + off - eh // 2,
+                             cell, eh, 16777215, 256, 2)
+        # Right (+x): rot 270 / 90 CW
+        if self._edge_blocked_at(x + 1, y) == 0:
+            engine.sprite_ex(engine.SPR_PITEDGE,
+                             cx + off - eh // 2, cy - cell // 2,
+                             eh, cell, 16777215, 256, 3)
+        # Left (−x): rot 90 CCW
+        if self._edge_blocked_at(x - 1, y) == 0:
+            engine.sprite_ex(engine.SPR_PITEDGE,
+                             cx - off - eh // 2, cy - cell // 2,
+                             eh, cell, 16777215, 256, 1)
+
     def draw_board_static(self) -> None:
         cell = self.cell
         sw = engine.width()
@@ -3695,23 +3780,36 @@ class Game:
                 px = self.cell_px(x)
                 py = self.cell_py(y)
                 if self.pit[i] > 0:
-                    if self._fill_visually_ready(i) == 1:
-                        engine.rect_a(px, py, cell, cell, 4139348, 120)
-                        if self.fillbox[i] >= 0:
-                            bi = self.fillbox[i]
-                            self.cspr_ex(engine.SPR_BOX, px, py, 179, 173,
-                                         8421504, 256, 0)
-                            if bi < len(self.box_unload):
-                                if self.box_unload[bi] == 1:
-                                    self.cspr_unload_wash(
-                                        engine.SPR_BOX, px, py, 179, 173)
-                    elif self.pit[i] == 1:
-                        engine.sprite(engine.SPR_SHALLOW, px, py, cell, cell)
-                    elif self.pit[i] == 2:
-                        engine.sprite(engine.SPR_PIT, px, py, cell, cell)
-                    else:
-                        engine.sprite(engine.SPR_BOTTOMLESS, px, py,
-                                      cell, cell)
+                    # Closed trapdoors cover their pitGo; edges for those
+                    # doors are drawn via the trapst branch below.
+                    show_pit = 1
+                    if self.trapst[i] >= 0:
+                        show_pit = 0
+                    if show_pit == 1:
+                        if self._fill_visually_ready(i) == 1:
+                            engine.rect_a(px, py, cell, cell, 4139348, 120)
+                            if self.fillbox[i] >= 0:
+                                bi = self.fillbox[i]
+                                self.cspr_ex(engine.SPR_BOX, px, py, 179, 173,
+                                             8421504, 256, 0)
+                                if bi < len(self.box_unload):
+                                    if self.box_unload[bi] == 1:
+                                        self.cspr_unload_wash(
+                                            engine.SPR_BOX, px, py, 179, 173)
+                        elif self.pit[i] == 1:
+                            engine.sprite(engine.SPR_SHALLOW, px, py,
+                                          cell, cell)
+                        elif self.pit[i] == 2:
+                            engine.sprite(engine.SPR_PIT, px, py, cell, cell)
+                        else:
+                            engine.sprite(engine.SPR_BOTTOMLESS, px, py,
+                                          cell, cell)
+                        self.draw_pit_edges(x, y, px, py)
+                elif self.trapst[i] >= 0:
+                    # Closed trapdoor: Unity keeps Grass edges under the
+                    # trapdoor's Bottomless Pit Graphics child while the
+                    # door plate is up (pitGo only activates on open).
+                    self.draw_pit_edges(x, y, px, py)
                 w = self.wall[i]
                 if w > 0:
                     sid = engine.SPR_WALL
@@ -3774,9 +3872,10 @@ class Game:
             vx = self.conn_vis_cell(self.porx[i], self.pory[i], bi, 0)
             vy = self.conn_vis_cell(self.porx[i], self.pory[i], bi, 1)
             if self.in_wall_or_door(vx, vy) == 0:
-                if self.conn_carrier_hidden(bi) == 0:
+                if self.conn_zone_hidden(bi, self.porx[i], self.pory[i],
+                                         0) == 0:
                     self.draw_connectable_line(self.porx[i], self.pory[i],
-                                               bi, 65535)
+                                               bi, 65535, 0)
             i = i + 1
         # rotating portal sprites (order 250), prefab scale 0.9
         i = 0
@@ -3785,7 +3884,8 @@ class Game:
             vx = self.conn_vis_cell(self.porx[i], self.pory[i], bi, 0)
             vy = self.conn_vis_cell(self.porx[i], self.pory[i], bi, 1)
             if self.in_wall_or_door(vx, vy) == 0:
-                if self.conn_carrier_hidden(bi) == 0:
+                if self.conn_zone_hidden(bi, self.porx[i], self.pory[i],
+                                         0) == 0:
                     self.cspr_ex(engine.SPR_PORTAL,
                                  self.conn_draw_px(self.porx[i], self.pory[i],
                                                    bi),
@@ -3809,16 +3909,24 @@ class Game:
             vx = self.conn_vis_cell(self.connx[i], self.conny[i], bi, 0)
             vy = self.conn_vis_cell(self.connx[i], self.conny[i], bi, 1)
             if self.in_wall_or_door(vx, vy) == 0:
-                if self.conn_carrier_hidden(bi) == 0:
-                    if t == 1:
+                if t == 1:
+                    if self.conn_zone_hidden(bi, self.connx[i],
+                                             self.conny[i], 1) == 0:
                         self.draw_connectable_line(self.connx[i],
-                                                   self.conny[i], bi, 16744703)
-                    if t == 2:
+                                                   self.conny[i], bi,
+                                                   16744703, 1)
+                if t == 2:
+                    if self.conn_zone_hidden(bi, self.connx[i],
+                                             self.conny[i], 0) == 0:
                         self.draw_connectable_line(self.connx[i],
-                                                   self.conny[i], bi, 255)
-                    if t == 3:
+                                                   self.conny[i], bi,
+                                                   255, 0)
+                if t == 3:
+                    if self.conn_zone_hidden(bi, self.connx[i],
+                                             self.conny[i], 0) == 0:
                         self.draw_connectable_line(self.connx[i],
-                                                   self.conny[i], bi, 16744448)
+                                                   self.conny[i], bi,
+                                                   16744448, 0)
             i = i + 1
         i = 0
         while i < len(self.boxx):
@@ -3873,7 +3981,8 @@ class Game:
                 vx = self.conn_vis_cell(self.connx[i], self.conny[i], bi, 0)
                 vy = self.conn_vis_cell(self.connx[i], self.conny[i], bi, 1)
                 if self.in_wall_or_door(vx, vy) == 0:
-                    if self.conn_carrier_hidden(bi) == 0:
+                    if self.conn_zone_hidden(bi, self.connx[i],
+                                             self.conny[i], 1) == 0:
                         # Propel Zone prefab: square art, scale 0.97
                         self.cspr(engine.SPR_PROPEL,
                                   self.conn_draw_px(self.connx[i],
@@ -3908,7 +4017,8 @@ class Game:
             vx = self.conn_vis_cell(self.connx[i], self.conny[i], bi, 0)
             vy = self.conn_vis_cell(self.connx[i], self.conny[i], bi, 1)
             if self.in_wall_or_door(vx, vy) == 0:
-                if self.conn_carrier_hidden(bi) == 0:
+                if self.conn_zone_hidden(bi, self.connx[i],
+                                         self.conny[i], 0) == 0:
                     if t == 2:
                         # Save Icon: 340x393 at 393 ppu, zone scale 0.97
                         self.cspr(engine.SPR_SAVE,
@@ -4889,14 +4999,27 @@ class Game:
         sh = engine.height()
         engine.clear(0)
         engine.sprite(engine.SPR_BACKGROUND, 0, 0, sw, sh)
-        engine.text_centered(sw // 2, self.uy(30), "SELECT LEVEL",
-                             16777215, self.ut(5))
         cols = 8
         bw = self.u(108)
         gap = self.u(30)
         rows = (self.nlevels + cols - 1) // cols
         x0 = (sw - cols * bw - (cols - 1) * gap) // 2
-        y0 = self.uy(140)
+        grid_h = rows * bw + (rows - 1) * gap
+        # Center the button group between a top band and the footer hint.
+        top = self.uy(90)
+        bot = sh - self.uy(70)
+        y0 = top + (bot - top - grid_h) // 2
+        if y0 < top:
+            y0 = top
+        # Title center sits halfway between the screen top and the button
+        # group top. text_centered's y is the glyph top (8x16 font).
+        title_sc = self.ut(5)
+        title_h = 16 * title_sc
+        title_y = y0 // 2 - title_h // 2
+        if title_y < 0:
+            title_y = 0
+        engine.text_centered(sw // 2, title_y, "SELECT LEVEL",
+                             16777215, title_sc)
         i = 0
         while i < self.nlevels:
             r = i // cols
